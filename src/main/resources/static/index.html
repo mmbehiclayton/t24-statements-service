@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Statement Service</title>
+<style>
+  :root { --ink:#1b2430; --muted:#5d6b7a; --line:#dde1e6; --brand:#1f3a5f; --bg:#f5f7fa; --ok:#1b7f4b; --warn:#a46200; --bad:#b42318; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
+  header { background:var(--brand); color:#fff; padding:14px 24px; }
+  header h1 { margin:0; font-size:18px; font-weight:600; }
+  header p { margin:2px 0 0; opacity:.8; font-size:12px; }
+  main { max-width:1180px; margin:0 auto; padding:20px 16px 48px; display:grid; gap:16px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:16px; }
+  .card h2 { margin:0 0 12px; font-size:15px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+  input, select { font:inherit; padding:7px 9px; border:1px solid var(--line); border-radius:6px; min-width:120px; }
+  button { font:inherit; padding:8px 14px; border-radius:6px; border:1px solid var(--brand); background:var(--brand); color:#fff; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--brand); }
+  button:disabled { opacity:.5; cursor:wait; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  .chip { font-size:12px; padding:3px 8px; border-radius:999px; border:1px solid var(--line); background:#fff; color:var(--ink); cursor:pointer; }
+  .chip:hover { border-color:var(--brand); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px; }
+  .kpi { border:1px solid var(--line); border-radius:6px; padding:10px; }
+  .kpi b { display:block; font-size:17px; margin-top:2px; font-variant-numeric:tabular-nums; }
+  .kpi span { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }
+  .ok { background:#e5f4ec; color:var(--ok); } .warn { background:#fdf1dc; color:var(--warn); } .bad { background:#fde8e6; color:var(--bad); }
+  .scroll { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { padding:6px 8px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }
+  td.desc { white-space:normal; min-width:220px; }
+  th { background:#f0f3f7; font-weight:600; position:sticky; top:0; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .muted { color:var(--muted); font-size:12px; }
+  .err { color:var(--bad); }
+  .hidden { display:none; }
+  .seg { display:inline-flex; border:1px solid var(--brand); border-radius:6px; overflow:hidden; margin-bottom:12px; }
+  .seg button { border:0; border-radius:0; background:#fff; color:var(--brand); }
+  .seg button.on { background:var(--brand); color:#fff; }
+  h3.sub { font-size:13px; margin:16px 0 6px; }
+  a.lnk { color:var(--brand); cursor:pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Statement Service</h1>
+  <p>Statements on demand for individual and corporate customers</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Statement on demand</h2>
+    <div class="seg" id="mode">
+      <button data-m="account" class="on">By account</button>
+      <button data-m="customer">By customer (all accounts)</button>
+    </div>
+    <div class="row">
+      <label>Company <select id="company"></select></label>
+      <label id="accountLbl">Account <input id="account" placeholder="Account number"></label>
+      <label id="customerLbl" class="hidden">Customer <input id="customer" placeholder="Customer number"></label>
+      <label>From <input id="from" type="date"></label>
+      <label>To <input id="to" type="date"></label>
+      <button id="view">View</button>
+      <button class="ghost" id="pdf">PDF</button>
+      <button class="ghost" id="csv">CSV</button>
+    </div>
+    <div id="accountPick">
+      <div class="muted" style="margin-top:10px">Customer accounts with the most statement history, then a few internal accounts (click to use):</div>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div id="customerPick" class="hidden">
+      <div class="muted" style="margin-top:10px">Customers with several accounts (click to use):</div>
+      <div class="chips" id="custChips"></div>
+    </div>
+    <div id="msg" class="err"></div>
+  </section>
+
+  <section class="card hidden" id="custResult">
+    <h2 id="custTitle"></h2>
+    <div class="kpis" id="custKpis"></div>
+    <h3 class="sub">Accounts</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Account</th><th>Account name</th><th>Ccy</th><th class="num">Opening</th><th class="num">Debits</th><th class="num">Credits</th><th class="num">Closing</th><th class="num">Transactions</th><th></th></tr></thead>
+        <tbody id="custAccounts"></tbody>
+      </table>
+    </div>
+    <h3 class="sub">Totals per currency</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Currency</th><th>Accounts</th><th class="num">Opening</th><th class="num">Debits</th><th class="num">Credits</th><th class="num">Closing</th></tr></thead>
+        <tbody id="custTotals"></tbody>
+      </table>
+    </div>
+    <p id="custSkipped" class="muted"></p>
+  </section>
+
+  <section class="card hidden" id="result">
+    <h2 id="title"></h2>
+    <div class="kpis" id="kpis"></div>
+    <p id="recon" class="muted"></p>
+    <div class="scroll" style="max-height:520px">
+      <table>
+        <thead><tr><th>Booking date</th><th>Value date</th><th>Description</th><th>Reference</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Balance</th></tr></thead>
+        <tbody id="lines"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Batch run</h2>
+    <p class="muted" style="margin-top:-6px">Generates PDF and CSV statements for the accounts with the most history and reports the timings.</p>
+    <div class="row">
+      <label>Accounts <input id="count" type="number" min="1" max="500" value="50"></label>
+      <button id="runBatch">Run batch</button>
+    </div>
+    <div id="batch" class="kpis" style="margin-top:12px"></div>
+    <div id="batchMsg" class="muted" style="margin-top:8px"></div>
+    <div class="scroll hidden" id="batchFilesWrap" style="max-height:360px; margin-top:10px">
+      <table>
+        <thead><tr><th>Statement</th><th>PDF</th><th>CSV</th></tr></thead>
+        <tbody id="batchFiles"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const money = v => v == null ? '' : Number(v).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ymd = s => s ? `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}` : '';
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `Request failed (${r.status})`);
+  return body;
+}
+
+async function loadCompanies() {
+  const c = await api('api/companies');
+  $('company').innerHTML = c.companies.map(x => `<option ${x === c.default ? 'selected' : ''}>${esc(x)}</option>`).join('');
+  await loadAccounts();
+}
+
+async function loadAccounts() {
+  $('chips').innerHTML = '<span class="muted">Loading...</span>';
+  try {
+    // Customer accounts (numeric ids) first; internal/position accounts after them
+    const all = await api(`api/accounts?company=${encodeURIComponent($('company').value)}&limit=200`);
+    const isCustomer = r => /^\d+$/.test(r.ACCOUNT);
+    const rows = [...all.filter(isCustomer).slice(0, 12), ...all.filter(r => !isCustomer(r)).slice(0, 4)];
+    $('chips').innerHTML = rows.map(r =>
+      `<button class="chip" data-a="${esc(r.ACCOUNT)}" data-f="${ymd(r.FIRST_PERIOD)}" data-t="${ymd(r.LAST_PERIOD)}">${esc(r.ACCOUNT)} · ${r.PERIODS} periods${isCustomer(r) ? '' : ' · internal'}</button>`).join('')
+      || '<span class="muted">No statement history in this company</span>';
+    if (rows[0] && !$('from').value) { $('from').value = '2025-01-01'; $('to').value = ymd(rows[0].LAST_PERIOD); }
+  } catch (e) { $('chips').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+$('chips').addEventListener('click', e => {
+  const b = e.target.closest('.chip'); if (!b) return;
+  $('account').value = b.dataset.a; $('from').value = '2025-01-01'; $('to').value = b.dataset.t;
+  view();
+});
+$('company').addEventListener('change', loadAccounts);
+
+function query(format) {
+  return `api/statement?company=${encodeURIComponent($('company').value)}&account=${encodeURIComponent($('account').value.trim())}&from=${$('from').value}&to=${$('to').value}&format=${format}`;
+}
+
+async function view() {
+  $('msg').textContent = '';
+  if (!$('account').value.trim() || !$('from').value || !$('to').value) { $('msg').textContent = 'Enter an account and both dates.'; return; }
+  $('view').disabled = true;
+  try {
+    const s = await api(query('json'));
+    render(s);
+  } catch (e) { $('msg').textContent = e.message; $('result').classList.add('hidden'); }
+  finally { $('view').disabled = false; }
+}
+
+function render(s) {
+  const a = s.account;
+  $('title').textContent = `${a.id} · ${a.title || a.shortTitle || ''} · ${a.currency}`;
+  const t = s.timing;
+  $('kpis').innerHTML = [
+    ['Opening balance', money(s.opening)], ['Total debits', money(s.totalDebits)], ['Total credits', money(s.totalCredits)],
+    ['Closing balance', money(s.closing)], ['Transactions', s.lines.length], ['Time (read + build + PDF)', `${t.readMs + t.computeMs + t.renderMs} ms`]
+  ].map(([k, v]) => `<div class="kpi"><span>${k}</span><b>${v}</b></div>`).join('');
+  const r = s.reconciliation;
+  let badge;
+  if (r.historyMatches === true) badge = '<span class="badge ok">Full history matches the live balance</span>';
+  else badge = ''; // an incomplete history (test data) is not an error: the closing balance is still anchored
+  $('recon').innerHTML = `${badge} Closing balance anchored to the live balance ${money(r.liveBalance)} less ${r.entriesAfterPeriod} later entries · ${r.periodRecordsRead} statement periods read` +
+    (r.unprintedEntries ? ` · ${r.unprintedEntries} not yet printed` : '') +
+    (r.archivedEntries ? ` · ${r.archivedEntries} from archive` : '') +
+    (r.missingEntries ? ` · <span class="err">${r.missingEntries} entries missing</span>` : '') +
+    ` · timings: read ${t.readMs} ms, build ${t.computeMs} ms, PDF ${t.renderMs} ms`;
+  $('lines').innerHTML = `<tr><td>${s.from}</td><td></td><td class="desc"><b>Opening balance</b></td><td></td><td></td><td></td><td class="num"><b>${money(s.opening)}</b></td></tr>` +
+    s.lines.map(l => `<tr><td>${l.bookingDate}</td><td>${l.valueDate ?? ''}</td><td class="desc">${esc(l.description)}${l.reversal ? ' <span class="badge warn">reversal</span>' : ''}</td><td>${esc(l.reference)}</td><td class="num">${money(l.debit)}</td><td class="num">${money(l.credit)}</td><td class="num">${money(l.balance)}</td></tr>`).join('') +
+    `<tr><td>${s.to}</td><td></td><td class="desc"><b>Closing balance</b></td><td></td><td></td><td></td><td class="num"><b>${money(s.closing)}</b></td></tr>`;
+  $('result').classList.remove('hidden');
+}
+
+let mode = 'account';
+$('mode').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  mode = b.dataset.m;
+  for (const x of $('mode').children) x.classList.toggle('on', x === b);
+  const cust = mode === 'customer';
+  $('accountLbl').classList.toggle('hidden', cust); $('accountPick').classList.toggle('hidden', cust);
+  $('customerLbl').classList.toggle('hidden', !cust); $('customerPick').classList.toggle('hidden', !cust);
+  $('result').classList.add('hidden'); $('custResult').classList.add('hidden'); $('msg').textContent = '';
+  if (cust && !$('custChips').innerHTML) loadCustomers();
+});
+
+async function loadCustomers() {
+  $('custChips').innerHTML = '<span class="muted">Loading...</span>';
+  try {
+    const rows = await api(`api/customers?company=${encodeURIComponent($('company').value)}&limit=16`);
+    $('custChips').innerHTML = rows.map(r =>
+      `<button class="chip" data-c="${esc(r.CUSTOMER)}">${esc(r.CUSTOMER)} · ${r.ACCOUNTS} accounts</button>`).join('')
+      || '<span class="muted">No customers with several accounts in this company</span>';
+  } catch (e) { $('custChips').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+$('custChips').addEventListener('click', e => {
+  const b = e.target.closest('.chip'); if (!b) return;
+  $('customer').value = b.dataset.c;
+  viewCustomer();
+});
+$('company').addEventListener('change', () => { $('custChips').innerHTML = ''; if (mode === 'customer') loadCustomers(); });
+
+function custQuery(format) {
+  return `api/customer-statement?company=${encodeURIComponent($('company').value)}&customer=${encodeURIComponent($('customer').value.trim())}&from=${$('from').value}&to=${$('to').value}&format=${format}`;
+}
+
+let custData = null;
+async function viewCustomer() {
+  $('msg').textContent = '';
+  if (!$('customer').value.trim() || !$('from').value || !$('to').value) { $('msg').textContent = 'Enter a customer and both dates.'; return; }
+  $('view').disabled = true;
+  try {
+    const r = await api(custQuery('json'));
+    custData = r.statement;
+    renderCustomer(r);
+  } catch (e) { $('msg').textContent = e.message; $('custResult').classList.add('hidden'); }
+  finally { $('view').disabled = false; }
+}
+
+function renderCustomer(r) {
+  const c = r.statement;
+  $('custTitle').textContent = `Customer ${c.customer}${c.name ? ' · ' + c.name : ''} · ${c.from} to ${c.to}`;
+  $('custKpis').innerHTML = [
+    ['Accounts', c.statements.length], ['Currencies', c.totals.length], ['Transactions', r.lines],
+    ['Time (all accounts + PDF)', `${r.totalMs} ms`]
+  ].map(([k, v]) => `<div class="kpi"><span>${k}</span><b>${v}</b></div>`).join('');
+  $('custAccounts').innerHTML = c.statements.map((s, i) => `<tr><td>${esc(s.account.id)}</td><td>${esc(s.account.title || s.account.shortTitle)}</td><td>${esc(s.account.currency)}</td>` +
+    `<td class="num">${money(s.opening)}</td><td class="num">${money(s.totalDebits)}</td><td class="num">${money(s.totalCredits)}</td><td class="num">${money(s.closing)}</td>` +
+    `<td class="num">${s.lines.length}</td><td><a class="lnk" data-i="${i}">View lines</a></td></tr>`).join('');
+  $('custTotals').innerHTML = c.totals.map(t => `<tr><td>${esc(t.currency)}</td><td>${t.accounts}</td><td class="num">${money(t.opening)}</td><td class="num">${money(t.totalDebits)}</td><td class="num">${money(t.totalCredits)}</td><td class="num"><b>${money(t.closing)}</b></td></tr>`).join('');
+  $('custSkipped').textContent = c.skipped.length ? 'Not included: ' + c.skipped.map(s => `${s.account} (${s.reason})`).join('; ') : '';
+  $('result').classList.add('hidden');
+  $('custResult').classList.remove('hidden');
+}
+
+$('custAccounts').addEventListener('click', e => {
+  const a = e.target.closest('a.lnk'); if (!a || !custData) return;
+  render(custData.statements[Number(a.dataset.i)]);
+  $('result').scrollIntoView({behavior:'smooth'});
+});
+
+$('view').addEventListener('click', () => mode === 'customer' ? viewCustomer() : view());
+$('pdf').addEventListener('click', () => {
+  if (mode === 'customer') { if ($('customer').value.trim()) window.open(custQuery('pdf')); }
+  else if ($('account').value.trim()) window.open(query('pdf'));
+});
+$('csv').addEventListener('click', () => {
+  if (mode === 'customer') { if ($('customer').value.trim()) window.open(custQuery('csv')); }
+  else if ($('account').value.trim()) window.open(query('csv'));
+});
+
+async function showBatchFiles(folder) {
+  const files = await api(`api/batch/${encodeURIComponent(folder)}`);
+  const byBase = {};
+  for (const f of files) {
+    const base = f.name.replace(/\.(pdf|csv)$/, '');
+    (byBase[base] ||= {})[f.name.endsWith('.pdf') ? 'pdf' : 'csv'] = f;
+  }
+  const link = f => f ? `<a href="api/batch/${encodeURIComponent(folder)}/${encodeURIComponent(f.name)}" target="_blank" rel="noopener">${(f.bytes / 1024).toFixed(1)} KB</a>` : '';
+  $('batchFiles').innerHTML = Object.entries(byBase).map(([base, f]) =>
+    `<tr><td>${esc(base.replace(/_/g, ' '))}</td><td>${link(f.pdf)}</td><td>${link(f.csv)}</td></tr>`).join('');
+  $('batchFilesWrap').classList.remove('hidden');
+}
+
+$('runBatch').addEventListener('click', async () => {
+  $('batchFilesWrap').classList.add('hidden');
+  if (!$('from').value || !$('to').value) { $('batchMsg').textContent = 'Set the From and To dates above first.'; return; }
+  $('runBatch').disabled = true; $('batchMsg').textContent = 'Running...'; $('batch').innerHTML = '';
+  try {
+    const b = await api('api/batch', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({company:$('company').value, count:Number($('count').value), from:$('from').value, to:$('to').value})});
+    $('batch').innerHTML = [
+      ['Statements', `${b.ok} / ${b.requested}`], ['Wall time', `${(b.wallMs/1000).toFixed(1)} s`], ['Per minute', Math.round(b.statementsPerMinute).toLocaleString()],
+      ['Average', `${b.avgMs} ms`], ['95th percentile', `${b.p95Ms} ms`], ['Slowest', `${b.maxMs} ms`], ['Lines', b.totalLines], ['Workers', b.threads]
+    ].map(([k, v]) => `<div class="kpi"><span>${k}</span><b>${v}</b></div>`).join('');
+    $('batchMsg').innerHTML = `PDF and CSV files written to <code>${esc(b.outputFolder)}</code> (listed below; PDF opens in a new tab)` + (b.failed ? ` · <span class="err">${b.failed} failed</span>` : '');
+    await showBatchFiles(b.outputFolder);
+  } catch (e) { $('batchMsg').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  finally { $('runBatch').disabled = false; }
+});
+
+loadCompanies().catch(e => { $('msg').textContent = e.message; });
+</script>
+</body>
+</html>
