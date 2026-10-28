@@ -1,5 +1,21 @@
 # History
 
+## 28 Oct 2026
+
+**Solution design, finalised as a proposal**
+- Added "Why not use STMT.ENT.BOOK" with a comparison table, and "How the service builds a statement, step by step" with both balance anchors and "Why it is fast".
+- Added a reader guide per audience and "What the bank is asked to approve now" (Phase 1 only).
+- Added "The fine details the service gets right": currency, booking date, reversals, fixed order, no double counting, missing entries, accounts with no movement, closed and new accounts, multi-company, narratives.
+- Added "T24 tables the service reads", with an "In the tested build" column.
+- Consistency fixes: T24 keeps sending MT940/942; the intraday call is optional; SFTP, SWIFT and bank file formats are later phases.
+- Rev 148:
+  - the deployment and architecture diagrams show one Statement Service (API, workers and scheduler in one application);
+  - production copies are now "sized after the benchmark";
+  - the step-by-step build is now a flow diagram.
+
+**Project context**
+- Added `CLAUDE.md`, `context/` (overview, architecture, workflow rules, progress tracker) and two repo skills (`deploy-ssedev`, `sync-solution-doc`).
+
 ## 27 Oct 2026
 
 **Solution design**
