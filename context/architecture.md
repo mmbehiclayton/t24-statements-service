@@ -36,7 +36,11 @@ The solution design adds things the MVP does not have yet. Keep the doc's "In th
 - joint accounts and accounts closed during the period;
 - a stored copy for closed periods and an audit trail;
 - an Oracle AQ job queue, a scheduler driven by `ACCOUNT.STATEMENT` frequencies, and Spring Batch partitioned by customer ID range;
-- Excel output, bank templates with an optional password, and email delivery.
+- Excel output, bank templates with an optional password, and email delivery;
+- one short read-only transaction per statement (`SET TRANSACTION READ ONLY`), so every table is read as at one moment (the MVP reads each table in its own statement);
+- bulk runs gated on the `DATES` record showing COB has finished.
+
+The design reads the T24 database directly through one read-only user, as the MVP does; a read-only copy (ADG standby, reporting replica) is optional and only a connection change. GoldenGate and the intraday IRIS/OFS call were dropped (rev 227).
 
 ## Runtime
 

@@ -1,4 +1,4 @@
-> Exported from the Claude Doc on 28 Oct 2026 (rev 148). The Claude Doc is the master copy; re-export after changes.
+> Exported from the Claude Doc on 28 Oct 2026 (rev 227). The Claude Doc is the master copy; re-export after changes.
 
 # Customer Statement Generation Solution — T24 R21
 
@@ -8,18 +8,18 @@ Oct 27, 2026 · @Clayton
 
 ## Executive summary
 
-We recommend a high-throughput **Statement Service** that runs alongside T24 and reads from a replica of the T24 Oracle database, instead of building statements inside the T24 application. It is designed to outperform the standard T24 statement solution at the bank's account volumes, and it reuses existing infrastructure wherever possible.
+We recommend a high-throughput **Statement Service** that runs alongside T24 and reads the T24 Oracle database directly through a read-only user, instead of building statements inside the T24 application. It is designed to outperform the standard T24 statement solution at the bank's account volumes, and it reuses existing infrastructure wherever possible.
 
-The standard solution struggles at scale because T24 itself builds every statement: enquiries run on the same application servers as live transactions, and bulk statements compete for the COB window. The proposed service moves that work off T24, reads by key from a database replica, generates statements in parallel, and stores closed-period statements so they are never rebuilt.
+The standard solution struggles at scale because T24 itself builds every statement: enquiries run on the same application servers as live transactions, and bulk statements compete for the COB window. The proposed service moves that work off the T24 application servers, reads by key directly from the T24 database through a read-only user, generates statements in parallel, and stores closed-period statements so they are never rebuilt.
 
-In short: **faster and more reliable statements for every customer, built on infrastructure the bank already owns.** For this phase the bank provides one UAT environment: a single server (8 vCPU, 16 GB RAM), 10–20 GB in an existing Oracle instance and about 100–200 GB of file storage; no new database is needed if Active Data Guard is available.
+In short: **faster and more reliable statements for every customer, built on infrastructure the bank already owns.** For this phase the bank provides one UAT environment: a single server (8 vCPU, 16 GB RAM), 10–20 GB in an existing Oracle instance and about 100–200 GB of file storage; no database copy and no new database licence are needed.
 
 Key commitments:
 
 - **Faster:** key-based reads and parallel generation, proven in a side-by-side benchmark against the standard T24 solution before full build. Pass mark: faster than the standard solution on every sampled account, and a 12-month statement for the heaviest account within \_\_\_ seconds.
 - **More reliable:** no dependency on T24 application capacity or the COB window; balances reconciled with T24 before statements are released.
 - **Scales with account growth:** capacity grows by adding service instances, not T24 capacity.
-- **Existing infrastructure first:** the database replica, job queue, file storage, gateways and delivery channels reuse what the bank already runs. The only new component is compute for the service itself, justified below.
+- **Existing infrastructure first:** the T24 database (read directly, no copy), job queue, file storage, gateways and delivery channels reuse what the bank already runs. The only new component is compute for the service itself, justified below.
 - **Focused first release:** on-demand PDF and Excel statements for individual and corporate customers through branches and internet banking, plus scheduled e-statements. Corporates get consolidated statements across all their accounts from day one. Bank file formats for corporates (SWIFT MT940/942, camt.053, SFTP), large bulk runs and serving other T24 databases follow in later phases, once the first release has proven itself.
 
 **What the bank is asked to approve now:** Phase 1 only: one UAT server, a read-only database user on the T24 UAT database, and the side-by-side benchmark against the standard T24 solution. Full build goes ahead only if the benchmark meets the pass mark.
@@ -57,10 +57,10 @@ Staff keep starting from T24 Browser; only the building of the statement moves o
 
 | Concern | Built inside T24 (Browser screens, enquiries, local routines) | This solution |
 | --- | --- | --- |
-| Effect on live banking | Every statement runs on the T24 application servers and the live database, next to teller, channel and COB work | Runs on its own server and reads a database copy; live banking is not touched |
+| Effect on live banking | Every statement runs on the T24 application servers and the live database, next to teller, channel and COB work | Runs on its own server and reads the T24 database directly by key, read-only; the T24 application servers are not touched and the database load is capped |
 | Large accounts and long periods | The enquiry builds each line through the T24 application; long ranges on busy accounts are slow and hit Browser session timeouts | Reads entries by key and streams the output; only the entries inside the requested range are read, so long ranges on busy accounts do not time out |
 | Corporates with many accounts | One enquiry per account, assembled by hand | One request returns all of a customer's accounts, with totals per currency, in one PDF or Excel file |
-| Month-end bulk | Tied to COB jobs and the end-of-day window | Runs after COB on the database copy, in parallel, at any time of day |
+| Month-end bulk | Tied to COB jobs and the end-of-day window | Runs after COB, in parallel, under a load limit the bank sets on the database |
 | Growing capacity | More T24 application capacity, inside the core change process | Add workers to the statement server; T24 is unchanged |
 | T24 upgrades | Local routines and enquiries must be rebuilt and retested on every upgrade | No code in T24; fields are read by name and checked automatically after each upgrade |
 | Making changes | Every template or format change is a T24 change with COB regression testing | Template and format changes are configuration on the statement server |
@@ -104,15 +104,15 @@ The test system holds far less data than the bank, so these figures show the app
 
 &#91;embedded content: target architecture · T24, ODS, Statement Service, channels\]
 
-A new Statement Service runs beside T24. It reads from the bank's existing backup copy of the T24 database instead of from live T24, builds statements, and delivers them through the channels the bank already uses.
+A new Statement Service runs beside T24. It reads the T24 database directly through a read-only user, without going through the T24 application, builds statements, and delivers them through the channels the bank already uses.
 
 ### How it works, in plain terms
 
-Think of T24 as the bank's busy main office. Today, every statement request is handled by that same office, so statements slow down live banking and live banking slows down statements. The new design sends statement work to a separate "reading room" that works from an up-to-date copy of the records.
+Think of T24 as the bank's busy main office. Today, every statement request is handled by that same office, so statements slow down live banking and live banking slows down statements. The new design sends statement work to a separate "reading room" that reads the same records directly, without taking the office's clerks away from customers.
 
 1. **A statement is requested:** a customer in internet or mobile banking, a branch officer, or the monthly schedule asks for a statement for a customer or an account.
 2. **The Statement Service takes the request:** a new application running beside T24, not inside it.
-3. **It reads the records from the copy:** the bank already keeps a standby copy of the T24 database for disaster recovery, updated within seconds. The service reads from that copy, so live T24 is not slowed down.
+3. **It reads the records directly:** it looks each record up in the T24 database by its key, through a read-only user, never through the T24 application, so tellers and channels are not slowed down. A limit set by the bank's DBAs caps how much database capacity it can use.
 4. **It builds the statement:** all of the customer's accounts in one document, with balances checked against T24 before release.
 5. **It delivers it:** download or email in the first release, and SFTP or SWIFT for corporates in a later phase, using channels the bank already has. A copy is kept, so asking again for the same past month is instant.
 
@@ -170,13 +170,13 @@ New indexes, longer timeouts or more T24 application servers can push the limit 
 |  | STMT.ENT.BOOK enquiry | Statement Service |
 | --- | --- | --- |
 | Where it runs | Inside T24, on the core application servers | On its own server, outside T24 |
-| Database it reads | The live T24 database | A read-only copy: the Active Data Guard standby or an existing reporting copy |
+| Database it reads | The live T24 database | The same database, read directly by primary key through a read-only user; the T24 application is not involved |
 | How it finds entries | Enquiry selection and per-line processing | Direct reads by the same keys T24 uses, in batches |
 | Long ranges on busy accounts | Can time out and return nothing | Reads only the entries in the range; heaviest accounts tested in the Phase 1 benchmark |
 | Customer with many accounts | One account at a time | One statement across all accounts, totals per currency |
 | Output | Screen or printer | PDF and Excel (CSV for data); bank file formats later |
 | Repeat requests | Rebuilt every time | Closed periods built once and served from storage |
-| Effect on live banking | Shares the core's capacity | None on the primary; bulk reads pause if the standby falls behind |
+| Effect on live banking | Shares the core's capacity | None on the T24 application servers; light key reads on the database, capped by a limit the bank sets |
 
 **Same figures, different route.** The service reads the same records that the enquiry and T24's own statement printing use: `ACCOUNT`, `ACCT.STMT.PRINT`, `STMT.PRINTED` and `STMT.ENTRY`. It does not calculate anything T24 has not already booked; it reads the booked entries faster and outside the core. That is why the Phase 1 benchmark compares its statements line by line with `STMT.ENT.BOOK` and with T24's printed statements. The enquiry itself stays available to staff, unchanged.
 
@@ -204,7 +204,7 @@ If the two disagree, the statement is held and flagged to operations instead of 
 - Every read is by primary key, the way T24 itself reads its tables: no table scans and no new indexes.
 - Only the periods and entries inside the requested range are read.
 - Field positions are looked up once from `STANDARD.SELECTION` and cached, so fields are read by name without per-line overhead.
-- The work runs on the service's own server, against a read-only copy of the database, so it neither waits for nor slows down live banking.
+- The work runs on the service's own server, and reads the database by key instead of through the T24 application, so it neither waits for nor slows down live banking; a database limit caps its share.
 
 **The fine details the service gets right**
 
@@ -220,6 +220,7 @@ Statements are only trusted if the edge cases are right. These rules are built i
 - **Closed and new accounts.** An account closed during the period is included up to its closing date; an account opened during the period starts from a zero opening balance. An account that cannot be read (for example, one held in another T24 company) is listed as skipped with the reason, never silently dropped.
 - **Several T24 companies.** T24 keeps separate tables for each company in a multi-company set-up. Each statement reads its account's own company tables and uses that company's branding.
 - **Narratives.** Each line shows the entry's own narrative and the description of its transaction code. Codes without a description show the code itself, and the Phase 1 analysis maps them so customers see the same wording as today.
+- **One point in time.** Each statement is read inside one short read-only transaction, so the opening balance, the entries and the closing balance all come from the same moment, even while T24 is posting or running COB. Bulk runs start only after the `DATES` record shows COB has finished.
 
 ## Why it outperforms the standard T24 solution
 
@@ -228,12 +229,12 @@ The proposed service is faster because it removes statement building from the T2
 | Area | Standard T24 statements | Proposed Statement Service |
 | --- | --- | --- |
 | Where the work runs | T24 application servers, shared with live transactions | Separate service; T24 application servers untouched |
-| Data access | Enquiry layer builds each line through the T24 application | Direct primary-key reads on a database replica |
+| Data access | Enquiry layer builds each line through the T24 application | Direct primary-key reads on the T24 database, read-only |
 | Concurrency | One enquiry per request; bulk tied to COB jobs | Parallel workers, accounts split across them |
-| Month-end bulk runs | Inside the COB window, competing with end-of-day jobs | After COB on the replica, at any time of day |
+| Month-end bulk runs | Inside the COB window, competing with end-of-day jobs | After COB, in parallel, within the bank's database load limit |
 | Repeat requests | Rebuilt every time | Recent closed periods served from storage; older ones rebuilt quickly |
 | Failures | Rerun the enquiry or the batch job | Per-account retry from the queue; one failure never stops a run |
-| Load on T24 primary | Grows with every statement | None from statement reads; only an optional small intraday call when to-the-second balances are required |
+| Load on T24 primary | Grows with every statement | Light primary-key reads only, a few dozen per statement, capped by a database limit; nothing runs on the T24 application servers |
 | Output | Delivery module formats, limited PDF | PDF, Excel and CSV; MT940/942 and camt.053 in a later phase |
 
 ### Built for very large account volumes
@@ -241,7 +242,7 @@ The proposed service is faster because it removes statement building from the T2
 - **Partitioned bulk runs:** month-end jobs are split by customer ID range across workers, so throughput grows with the number of workers and each customer's accounts are built and delivered together.
 - **Pre-generation:** only for e-statement subscribers and corporates, whose monthly statements are generated right after COB and stored. Everyone else is served on demand, so the bank does not build and store millions of statements nobody opens.
 - **Generate once:** a closed period never changes, so its statement is built once and served from storage for the retention period (3 months recommended).
-- **Back-pressure:** the job queue caps concurrent reads, protecting the replica during peaks.
+- **Back-pressure:** the job queue caps concurrent reads, protecting the T24 database during peaks; an Oracle Resource Manager limit on the service's read-only user is the hard cap.
 - **Streaming output:** very large corporate statements are written page by page, keeping memory flat regardless of entry count.
 
 ### Proving it before full build
@@ -250,13 +251,13 @@ Phase 1 includes a side-by-side benchmark on a sample of the bank's highest-volu
 
 ## Options considered
 
-A replica-backed Statement Service is the only option that meets all objectives on its own; the others are kept as supporting components.
+A Statement Service reading the T24 database directly is the only option that meets all objectives on its own; the others are kept as supporting components.
 
 | Option | How it works | Strengths | Limitations | Role in solution |
 | --- | --- | --- | --- | --- |
 | 1. Standard T24 statements (current) | `ACCOUNT.STATEMENT` frequencies, COB generation, enquiries, Delivery module output | Already in place; T24 balance logic; MT940/942 for SWIFT | Slow at high volumes, shares T24 capacity, tied to COB, rigid output | Retained for statement frequencies and SWIFT MT940/942 |
-| 2. Tuned enquiry over IRIS/OFS | Optimized enquiry exposed to a rendering service | Real-time, branded output | Still runs inside T24; long ranges strain production | Used only for today's entries |
-| 3. Replica-backed Statement Service | Service reads by key from a T24 database replica and generates in parallel | No T24 application load, any range, scales out, reuses existing standby | Needs reconciliation and replica access | **Recommended core** |
+| 2. Tuned enquiry over IRIS/OFS | Optimized enquiry exposed to a rendering service | Real-time, branded output | Still runs inside T24; long ranges strain production | Not used: the service reads today's entries from the database |
+| 3. Statement Service reading the T24 database directly | Service reads by key from the T24 database through a read-only user and generates in parallel | No T24 application load, any range, scales out, no database copy needed | Needs reconciliation, a read-only database user and a load limit | **Recommended core** |
 | 4. Third-party CCM engine | Vendor platform templates and delivers extracts | Polished output, archiving | Licence cost, new infrastructure, still needs a data source | Not proposed; can be added later for templating |
 
 ## Individual vs corporate capabilities
@@ -273,7 +274,7 @@ A replica-backed Statement Service is the only option that meets all objectives 
 
 ## What the bank needs to invest
 
-The bank needs **application servers for the Statement Service and file storage for generated statements**. No new database is needed if Active Data Guard is available; the main possible licence cost is Active Data Guard itself. This phase covers a single environment: a UAT environment, also used for development and for the Phase 1 benchmark. Production, DR and other test environments are sized after the benchmark, using the same software.
+The bank needs **application servers for the Statement Service and file storage for generated statements**. No database copy is needed: the service reads the T24 database directly through a read-only user, so no Active Data Guard or GoldenGate licence is needed. This phase covers a single environment: a UAT environment, also used for development and for the Phase 1 benchmark. Production, DR and other test environments are sized after the benchmark, using the same software.
 
 ### Servers (UAT environment)
 
@@ -289,11 +290,10 @@ Requests, the staff console, statement building and scheduling all run inside on
 
 | Item | Investment |
 | --- | --- |
-| T24 standby database | No new database. In UAT the service reads the bank's T24 UAT database through a read-only user, so no standby or Active Data Guard is needed for this phase; production reads the standby |
+| T24 database (read directly) | No new database and no copy. The service reads the T24 database through a read-only user (SELECT only on the listed tables), in UAT and in production; an Oracle Resource Manager limit caps its load |
 | Service schema (jobs, audit, queue) | 10–20 GB for UAT on an existing non-core Oracle instance |
-| GoldenGate fallback (only if Active Data Guard is not available and the bank has no reporting copy of T24) | A schema on an existing Oracle instance, sized to the replicated tables |
 
-**Why the service needs a small database of its own:** the T24 standby copy is read-only, so the service cannot write to it. It needs a place to keep its own working records: statement requests and their status, the waiting list of jobs, month-end run progress, an index of where each statement file is stored, customer statement preferences, reconciliation results, and the audit trail. The statement files themselves stay on the NAS, not in the database.
+**Why the service needs a small database of its own:** the service only reads T24 and never writes to it. It needs a place to keep its own working records: statement requests and their status, the waiting list of jobs, month-end run progress, an index of where each statement file is stored, customer statement preferences, reconciliation results, and the audit trail. The statement files themselves stay on the NAS, not in the database.
 
 | Option | Investment | When to choose it |
 | --- | --- | --- |
@@ -311,7 +311,7 @@ For UAT, test statements are kept for 30 days, so about 100–200 GB on the bank
 
 | Item | Cost |
 | --- | --- |
-| Active Data Guard | Not needed for UAT. For production, an Oracle licence option needed on both the primary and the standby database servers, if not already held (Oracle confirms the exact terms). The single largest possible cost; still cheaper than a second database |
+| Active Data Guard | Not needed: the service reads the T24 database directly. Only relevant if the bank later chooses to point the service at a standby that is not already licensed. Oracle Resource Manager, used to cap the load, is part of Oracle Enterprise Edition at no extra cost |
 | Application software | None: Java 21 and the frameworks used are open source |
 | Operating system or platform | Only if new VMs need OS subscriptions (e.g. Red Hat), or the container platform is licensed per core |
 
@@ -344,7 +344,7 @@ Nothing is installed on T24, so **deployment needs no T24 downtime**, and the cu
 
 ### Steps
 
-1. **Prepare the environment:** DBAs open the standby read-only and create a read-only user and the service schema; infrastructure provides servers or cluster capacity, a NAS share and firewall rules.
+1. **Prepare the environment:** DBAs create a read-only user on the T24 database, a Resource Manager limit for it, and the service schema; infrastructure provides servers or cluster capacity, a NAS share and firewall rules.
 2. **Install in test environments:** the service is packaged as container images (or executable files for VMs) and installed through the bank's existing release pipeline into the UAT environment.
 3. **Configure:** statement templates and branding, transaction narratives, delivery channels, user roles in the console.
 4. **User acceptance testing:** business users compare new statements against current statements for a sample of individual, joint and corporate customers, and sign off.
@@ -362,7 +362,7 @@ If a problem appears, channels are pointed back to the standard T24 solution thr
 | Team | Responsibility |
 | --- | --- |
 | Bank infrastructure | Servers or cluster capacity, NAS, firewall rules, monitoring |
-| Bank DBAs | Active Data Guard, read-only user, service schema, backups |
+| Bank DBAs | Read-only user, Resource Manager limit, service schema, backups |
 | T24 team | Drill-down in T24, inventory of current statement routines, reconciliation sign-off |
 | Project delivery team | Build, configuration, testing, deployment, handover |
 | Business and operations | Templates, acceptance testing, console users, go-live approval |
@@ -375,7 +375,7 @@ Updates are released through the same pipeline with rolling updates and no downt
 
 &#91;embedded content: implementation roadmap · 4 phases, 3 gates\]
 
-Phase 1 is a short proof: read access on the standby, a prototype, and a benchmark against the standard T24 solution on the bank's own highest-volume accounts. Build continues only if the prototype beats that baseline, which also gives the figures to size the new compute. The Statement Console's request, job and reconciliation screens arrive in Phase 2; bulk-run, re-send and template screens follow in Phases 3 and 4. Durations are indicative.
+Phase 1 is a short proof: read-only access to the T24 database, a prototype, and a benchmark against the standard T24 solution on the bank's own highest-volume accounts. Build continues only if the prototype beats that baseline, which also gives the figures to size the new compute. The benchmark also measures the load the service puts on the T24 database. The Statement Console's request, job and reconciliation screens arrive in Phase 2; bulk-run, re-send and template screens follow in Phases 3 and 4. Durations are indicative.
 
 **First release (Phases 1 and 2):** on-demand PDF and Excel statements for individual and corporate customers (consolidated across all of a corporate's accounts) through branches and internet banking, scheduled e-statements, the reconciliation job and the request screens. **Later phases:** bank file formats for corporates (SWIFT MT940/942 and camt.053, SFTP host-to-host), large scheduled bulk runs (the full batch framework is added only when bulk volumes need it) and serving other T24 databases. Keeping the first release small brings it live sooner and limits the risk.
 
@@ -384,8 +384,8 @@ Phase 1 is a short proof: read access on the standby, a prototype, and a benchma
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Prototype does not beat the standard solution | Business case fails | Benchmark in Phase 1 against measured baseline; full build only after targets are met |
-| Active Data Guard not licensed | Cannot read the existing standby | Read a copy the bank already runs (reporting replica, operational data store or Temenos Data Hub); GoldenGate only as a last resort, as it usually costs more than Active Data Guard |
-| Read load affects the standby's DR role | DR readiness concerns | DR comes first: bulk runs pause automatically when standby lag passes an agreed threshold and resume when it recovers; the queue caps concurrent reads; bulk runs scheduled off-peak |
+| Bank policy does not allow a new application on the core database | Direct read access not approved | Point the service at a read-only copy the bank already runs (ADG standby, reporting replica or Temenos Data Hub); same reads, only the connection changes |
+| Statement reads load the live T24 database | Slower tellers, channels or COB | Reads by primary key only; Resource Manager caps CPU and sessions; the queue caps concurrent reads; bulk runs only after COB; the Phase 1 benchmark measures load before go-live |
 | Balance mismatches from back-valued entries | Incorrect statements | Opening balances taken from T24's own statement records; nightly reconciliation blocks release on any break |
 | Very large corporate accounts | Slow generation | Async processing, streaming output, closed periods stored |
 | Archived data gaps | Incomplete history | Agree the archive tables and cut-off date in the data-mapping workshop; verify coverage during the benchmark and report gaps before go-live |
@@ -396,7 +396,7 @@ Phase 1 is a short proof: read access on the standby, a prototype, and a benchma
 ## Assumptions and dependencies
 
 - T24 R21 runs on Oracle (confirmed).
-- The bank runs a Data Guard standby of the T24 database for DR, and can open it read-only (Active Data Guard licensed on both primary and standby, or licensable).
+- The bank can create a read-only database user on the T24 database (SELECT only on the listed tables) and an Oracle Resource Manager limit for it.
 - The bank has several million customers; production server and storage figures are sized from the Phase 1 benchmark, run in the UAT environment.
 - The existing API gateway, email, SFTP and SWIFT interfaces, file storage and container or app-server platform can host the new workload.
 - Archived statement entries are accessible for statements covering archived periods.
@@ -406,7 +406,7 @@ Phase 1 is a short proof: read access on the standby, a prototype, and a benchma
 
 The following should be confirmed with the business to finalize sizing and scope:
 
-- [ ] Whether Active Data Guard is licensed for the T24 primary and standby, and whether the bank already has a reporting copy of T24 (reporting replica, operational data store or Temenos Data Hub) the service could read instead
+- [ ] Whether the bank's policy allows a read-only user directly on the T24 database, or requires the service to read a copy the bank already runs (ADG standby, reporting replica or Temenos Data Hub)
 - [ ] Number of customers receiving statements each month, and how long statement files must be kept
 - [ ] Whether the service must serve other T24 databases or group entities, now or later
 - [ ] Which container platform or app servers can host the new service
@@ -427,15 +427,15 @@ The sections above are written for business and management readers. The sections
 
 ## Component design
 
-### 1. Data layer: T24 database read replica
+### 1. Data layer: direct read-only access to the T24 database
 
-- **Preferred: the existing Data Guard standby, opened read-only (Active Data Guard).** T24 Oracle installations normally already run a standby for DR. With Active Data Guard, that standby serves reads while it keeps applying changes, so the service gets near real-time data with no load on the primary and no new database.
+- **Direct, read-only access.** The service reads the T24 Oracle database itself through one read-only user, by primary key, never through the T24 application. This is how the tested build works. An Oracle Resource Manager limit caps the user's CPU and sessions, so statement load can never crowd out tellers, channels or COB.
 - **Access pattern:** reads follow the same keys T24 uses. `ACCT.STMT.PRINT` gives the statement dates and the balance at each one; `STMT.PRINTED` gives the `STMT.ENTRY` IDs of each statement period. These records exist only at statement-frequency dates, so a request for any other date range reads the periods that overlap it and keeps only the entries inside the range. Entries of the current open period are listed in the open period's `STMT.PRINTED` record, which T24 keeps under the next statement date, and entries booked today come from `ACCT.ENT.TODAY`. The tested build reads both; the bank's set-up is confirmed in the data-mapping workshop. Entries are fetched by primary key in batches. No new indexes or objects are created on T24 tables.
-- **Fallback: a copy the bank already runs.** If Active Data Guard is not licensed, or the DR standby must stay closed, the service reads an existing reporting copy of T24 instead: a reporting replica, an operational data store, or Temenos Data Hub. Only if none exists does GoldenGate replicate the needed tables into a new schema on an existing non-core Oracle instance. GoldenGate is usually more expensive than Active Data Guard, so it is the last resort and the only case where new data-layer capacity is needed.
+- **Optional: a read-only copy.** If bank policy forbids a new application on the core database, or the benchmark shows month-end load the bank is not comfortable with, the same reads run against a copy the bank already runs (an Active Data Guard standby, reporting replica or Temenos Data Hub). Only the connection changes. No GoldenGate or new copy is built.
 - **Archived entries:** in R21, T24's archiving moves old STMT.ENTRY records out of the live tables into archive tables (the $ARC copies of the entry and statement files, or a separate archive database, depending on how the bank set it up). When a requested period falls before the archive cut-off date, the reader reads those archive tables by the same keys. The exact tables and the cut-off date are agreed in the data-mapping workshop, and coverage is tested in the Phase 1 benchmark.
 - **Field mapping:** reading T24 tables directly is outside Temenos support, so the service maps fields inside `XMLRECORD` by name, using T24's own field definitions (`STANDARD.SELECTION`), never by position. An automated regression test compares sample statements with T24 after every T24 upgrade or local-field change.
 - **Very large records:** high-volume accounts can have very large `STMT.PRINTED` records (hundreds of thousands of entry IDs). The reader processes them in chunks and streams output, and the heaviest accounts are part of the Phase 1 benchmark.
-- **DR comes first:** bulk reads pause automatically when standby lag passes an agreed threshold and resume when it recovers, so statement load never delays the standby's DR role.
+- **Load limits:** a bounded connection pool, worker throttling, bulk runs after COB, and the Resource Manager cap.
 
 **T24 tables the service reads.** The read-only database user is granted SELECT on these tables only, for each T24 company. In the database each table is named per company (for example `F<company mnemonic>_STMT_ENTRY`) and holds a record key plus `XMLRECORD`.
 
@@ -455,9 +455,9 @@ The sections above are written for business and management readers. The sections
 | `DATES` | Company | Current business date and COB completion | Added in build |
 | `STANDARD.SELECTION` | Table name | Field names and positions, so every field is read by name | Yes |
 
-### 2. Intraday top-up
+### 2. Consistent reads
 
-With Active Data Guard the replica lags production by seconds, so an intraday call is only needed if the bank requires to-the-second balances. In the GoldenGate fallback, or when exact real-time is required, today's entries are read live from T24 through IRIS or OFS: a small, bounded query with negligible impact.
+Each statement is read inside one short read-only transaction (SET TRANSACTION READ ONLY), so every table is seen as at one moment, even while T24 is posting or running COB: an entry is never counted twice or missed between the balance and the entry list. The transaction lasts under a second, so it puts no pressure on the database's undo space. Today's entries come from ACCT.ENT.TODAY in the same read, so no intraday call to T24 through IRIS or OFS is needed. Bulk runs start only after the DATES record shows COB has finished.
 
 ### 3. Statement Service
 
@@ -492,7 +492,7 @@ The Statement Service is one codebase built as a multi-module Maven project, dep
 | --- | --- |
 | `statement-api` | REST endpoints, request validation, customer and account entitlement checks, sync/async routing; hosts the Statement Console |
 | `statement-core` | Statement model, customer-to-account resolution, opening and closing balance logic, consolidated multi-account and multi-currency statements |
-| `statement-t24-reader` | Key-based reads on the T24 standby of the tables listed in Component design, section 1; field positions from `STANDARD.SELECTION`; parses `XMLRECORD`; optional IRIS/OFS intraday call |
+| `statement-t24-reader` | Key-based reads on the T24 database (read-only user) of the tables listed in Component design, section 1; field positions from `STANDARD.SELECTION`; parses `XMLRECORD`; one read-only transaction per statement |
 | `statement-render` | PDF (with password), Excel, CSV, MT940/942 and camt.053 writers, all streaming; customer summary pages |
 | `statement-delivery` | Adapters for download, email, SFTP and SWIFT, with retries; one delivery per customer |
 | `statement-worker` | Consumes queue jobs, generates and stores files, updates job status |
@@ -516,7 +516,7 @@ All endpoints are versioned, JSON over HTTPS, and published through the bank's A
 
 Statements are requested, generated and delivered at **customer** level, not only per account: one request for a customer covers all of their accounts, or a selected subset.
 
-**Resolving a customer's accounts** (all reads on the standby):
+**Resolving a customer's accounts** (all reads on the T24 database, read-only):
 
 - `CUSTOMER.ACCOUNT` gives the accounts the customer owns.
 - The joint-holder cross-reference (`JOINT.CONTRACTS.XREF`) adds accounts where the customer is a joint holder. Joint accounts appear on each joint holder's customer statement, and each holder receives their own copy through their own delivery channel and password.
@@ -556,7 +556,7 @@ Totals are shown per currency; currencies are never summed together unless the b
 
 ### Service data model
 
-The service keeps a small schema of its own on an existing non-core Oracle instance (the T24 standby is read-only).
+The service keeps a small schema of its own on an existing non-core Oracle instance (the service never writes to T24).
 
 | Table | Holds |
 | --- | --- |
@@ -597,19 +597,18 @@ There is no new customer-facing UI. Customers use the bank's existing internet a
 
 ### T24 changes
 
-The service reads T24 data directly from the standby, so the statement path needs no new T24 routines or enquiries.
+The service reads T24 data directly from the T24 database, so the statement path needs no new T24 routines or enquiries.
 
 | Item | Type | Required? | Purpose |
 | --- | --- | --- | --- |
 | Drill-down on an existing customer or account enquiry | Enquiry configuration (a small routine only if the Browser/Explorer setup cannot open a URL) | Required | Opens the Statement Console with the customer or account pre-filled for branch staff |
-| Read-only database user on the standby | DBA task | Required | SELECT only, on the tables listed in Component design, section 1, for each T24 company the bank runs |
-| Intraday enquiry over IRIS or OFS | NOFILE enquiry returning today's entries for a customer's accounts | Only if to-the-second balances are required and the standard IRIS API is not available | Live top-up of today's entries |
+| Read-only database user on the T24 database | DBA task | Required | SELECT only, on the tables listed in Component design, section 1, for each T24 company the bank runs |
 
 Not needed:
 
 - No statement-building enquiries or conversion routines: customers, accounts, entries and balances are read by key.
-- No new COB jobs or TSA services: the scheduler detects COB completion from the T24 `DATES` record on the standby.
-- No reconciliation routine: balances are compared on the standby.
+- No new COB jobs or TSA services: the scheduler detects COB completion from the T24 `DATES` record.
+- No reconciliation routine: balances are compared by reading the T24 database.
 
 **Analysis task in Phase 1:** the bank's current statements likely rely on local routines (narrative builders, enquiry conversion routines, Delivery mapping routines). These are inventoried and their logic carried into the service, so customers see the same narratives as today. This is the main T24-side effort and is sized during the benchmark.
 
@@ -619,14 +618,14 @@ The solution is designed to run on the bank's existing infrastructure. The only 
 
 &#91;embedded content: deployment architecture · 4 network zones\]
 
-Channels reach the service through the API gateway; the service reads the existing T24 standby, calls T24 only for an optional intraday top-up, and the existing Data Guard link keeps the standby in sync.
+Channels reach the service through the API gateway; the service reads the T24 database directly through one read-only user and keeps its own jobs and audit in a small schema on an existing Oracle instance. The T24 application servers are not used.
 
 ### Existing vs new infrastructure
 
 | Component | Existing or new | Justification |
 | --- | --- | --- |
-| T24 Data Guard standby (read replica) | Existing | Opened read-only with Active Data Guard; already kept in sync for DR |
-| Job queue (Oracle Advanced Queuing) | Existing | Built into Oracle; lives in a small service schema on an existing non-core Oracle instance, since the standby is read-only. No new broker. The bank's existing message broker can be used instead |
+| T24 Oracle database | Existing | Read directly through one read-only user; load capped by Oracle Resource Manager |
+| Job queue (Oracle Advanced Queuing) | Existing | Built into Oracle; lives in a small service schema on an existing non-core Oracle instance, since the service never writes to T24. No new broker. The bank's existing message broker can be used instead |
 | File storage for generated statements | Existing | Bank NAS or document store, with a retention policy |
 | API gateway, internet and mobile banking | Existing | Statement API published through the current gateway |
 | Email gateway, SFTP server, SWIFT interface | Existing | Delivery reuses current channels and controls |
@@ -634,18 +633,16 @@ Channels reach the service through the API gateway; the service reads the existi
 | Container platform or app server hosts | Existing where available | Service deployed as a new workload on the bank's current platform |
 | Compute for the Statement Service | **New** | Statement building must run outside T24 to beat the standard solution; sharing T24 servers would recreate today's bottleneck. Sized from the Phase 1 benchmark |
 | Statement Console | **New (no new server)** | Branch staff and operations need to request statements, supervise runs, clear reconciliation breaks and re-send files; it is part of the same Statement Service application |
-| Active Data Guard licence | **New, if not held** | Cheapest way to read live data without load on the primary; avoids a second database |
-| GoldenGate schema on existing Oracle instance | **Fallback only** | Needed only if Active Data Guard is not available and no reporting copy of T24 exists; uses an existing non-core Oracle instance |
+| Read-only copy of T24 (standby or reporting copy) | **Optional** | Only if bank policy forbids direct access or the benchmark shows too much load; the service switches to it by configuration |
 
-Using the standby avoids adding a database, keeps the bank's DBA practices unchanged, and means statement retrieval keeps working while T24 runs COB.
+Reading the T24 database directly avoids a copy, a licence and a second database to run; the bank's DBA practices stay unchanged, and on-demand statements keep working while T24 runs COB.
 
 ### Request flows
 
-1. **On-demand (small range):** channel → API gateway → Statement API → key-based reads on the standby → renders PDF/Excel → returns the file and stores a copy if the period is closed.
+1. **On-demand (small range):** channel → API gateway → Statement API → key-based reads on the T24 database → renders PDF/Excel → returns the file and stores a copy if the period is closed.
 2. **On-demand (large range or corporate):** Statement API places a job on the queue → the same service picks it up in the background and generates the statement → file saved to storage → customer or staff notified with a download link.
 3. **Month-end and scheduled:** after COB the scheduler reads `ACCOUNT.STATEMENT` frequencies → splits customers into ranges and resolves their accounts → workers generate in parallel and deliver via email, SFTP or SWIFT.
-4. **Replication:** existing Data Guard redo apply keeps the standby within seconds of production.
-5. **Reconciliation:** nightly job compares statement closing balances with T24 → any break flags the account and blocks its statements until resolved.
+4. **Reconciliation:** nightly job compares statement closing balances with T24 → any break flags the account and blocks its statements until resolved.
 
 ### Environments
 
@@ -661,20 +658,19 @@ Deployments go through the bank's CI/CD pipeline as container images, with confi
 
 ### Technology stack
 
-The stack uses mainstream, open-source Java components so no new licences are needed beyond Active Data Guard (if not already held).
+The stack uses mainstream, open-source Java components so no new licences are needed no new licences are needed.
 
 | Layer | Technology | Why |
 | --- | --- | --- |
 | Language and runtime | Java 21 LTS | Latest long-term-support release; virtual threads let each instance run thousands of concurrent database reads with little memory, which suits high-volume statement generation |
 | Application framework | Spring Boot 3.3+ (Web, Security, Actuator, JDBC), virtual threads enabled | Standard for bank microservices; built-in health and metrics |
 | Bulk processing | Spring Batch with partitioned steps | Splits month-end runs by customer ID range across workers, with restart from the last checkpoint |
-| Database access | Oracle JDBC (ojdbc11) with HikariCP connection pooling | Native Oracle driver; pooled, bounded connections to the standby |
+| Database access | Oracle JDBC (ojdbc11) with HikariCP connection pooling | Native Oracle driver; pooled, bounded, read-only connections to the T24 database |
 | T24 record parsing | StAX streaming XML parser | Reads `XMLRECORD` without loading whole records into memory |
 | Job queue | Oracle Advanced Queuing via Spring JMS | Included with Oracle; transactional with the service schema |
 | PDF | OpenPDF (used in the tested build) or JasperReports templates; Apache PDFBox for password protection | Bank-branded templates; standard PDF encryption |
 | Excel and CSV | Apache POI (streaming SXSSF), OpenCSV | Writes very large statements with flat memory use |
 | SWIFT and ISO 20022 | Prowide Core (MT940/942), Prowide ISO 20022 (camt.053) | Open-source, standards-validated message builders |
-| Intraday T24 call | IRIS REST client or OFS over TWS (SOAP) | Uses T24's existing integration layer |
 | Security | Spring Security OAuth2 resource server (JWT from the API gateway), TLS 1.2+ | Fits the existing gateway; no new identity provider |
 | Schema migrations | Liquibase | Versioned, repeatable changes to the service schema |
 | Observability | Micrometer metrics, JSON logs | Feeds the bank's existing monitoring and log platforms (e.g. Prometheus/Grafana, ELK or Splunk) |
@@ -702,7 +698,7 @@ Releases follow the bank's existing CI/CD: build and test, scan the image, push 
 
 ### Network ports and firewall rules
 
-All new rules originate from the application zone; no new inbound access is opened to the T24 primary database or application servers. Ports marked "as configured" follow the bank's existing setup and must be confirmed with the network team.
+All new rules originate from the application zone; the only new path into the core banking zone is the service's read-only database connection; nothing new reaches the T24 application servers. Ports marked "as configured" follow the bank's existing setup and must be confirmed with the network team.
 
 | Source | Destination | Port | Protocol | Purpose |
 | --- | --- | --- | --- | --- |
@@ -710,25 +706,23 @@ All new rules originate from the application zone; no new inbound access is open
 | API gateway | `statement-api` | 8443 | HTTPS (TLS 1.2+) | Statement requests |
 | Branch and operations staff (internal network) | `statement-api` console route | 8443 | HTTPS (TLS 1.2+) | Statement Console, internal only |
 | `statement-api` | Active Directory / identity provider | 636 (LDAPS) or 443 (SAML/OIDC), as configured | LDAPS or HTTPS | Console sign-in and roles |
-| API, worker, scheduler | T24 standby database | 1521 (or 2484 with TLS) | Oracle Net / TCPS | Key-based reads (read-only user) |
+| API, worker, scheduler | T24 database | 1521 (or 2484 with TLS) | Oracle Net / TCPS | Key-based reads (read-only user) |
 | API, worker, scheduler | Service schema (existing Oracle instance) | 1521 (or 2484 with TLS) | Oracle Net / TCPS | Jobs, audit, AQ queue |
-| `statement-api` | T24 IRIS / TWS | 443 or 8443, as configured | HTTPS | Optional intraday entries |
 | `statement-worker` | Email relay (SMTP) | 587 | SMTP with STARTTLS | Statement emails |
 | `statement-worker` | SFTP server | 22 | SFTP | Corporate host-to-host files |
 | `statement-worker` | SWIFT interface (e.g. Alliance Access via file drop or MQ) | As configured (e.g. 1414 for IBM MQ) | MQ or file transfer | MT940/942 and camt.053 |
 | API, worker | NAS statement store | 2049 (NFS) or 445 (SMB) | NFS / SMB | Store and read generated files |
 | Monitoring platform | All service roles | 8081 (internal only) | HTTP | Health checks and metrics |
-| T24 primary | T24 standby | 1521, existing | Oracle Net | Existing Data Guard redo transport (no change) |
 
-The database account used on the standby is read-only and limited to the tables listed in the solution design.
+The database account used on the T24 database is read-only and limited to the tables listed in the solution design.
 
 ## Non-functional design
 
 - **Scalability:** stateless service instances scale horizontally; bulk runs are split by customer range across workers; reads are by primary key, so cost per statement stays flat as the account base and history grow.
-- **Performance:** statement reads never touch T24 except the bounded intraday call; closed-period statements are generated once and served from storage.
-- **Availability:** statement retrieval keeps working during T24 COB and maintenance windows because it reads from the replica, not the T24 application.
+- **Performance:** statement reads never use the T24 application servers, only light key reads on the database under a load limit; closed-period statements are generated once and served from storage.
+- **Availability:** statement retrieval keeps working during T24 COB and maintenance windows because it reads the database directly, not through the T24 application; each statement reads one consistent point in time, and bulk runs wait until COB has finished.
 - **Security:** role-based access for staff channels, password-protected PDFs, encryption in transit and at rest, full audit trail.
-- **Observability:** metrics in the bank's existing monitoring tools for request volumes, generation times, queue depth, replication lag and reconciliation breaks, with alerts on each.
+- **Observability:** metrics in the bank's existing monitoring tools for request volumes, generation times, queue depth, the service's load on the T24 database and reconciliation breaks, with alerts on each.
 
 ## Glossary
 
@@ -737,9 +731,8 @@ The database account used on the standby is read-only and limited to the tables 
 | T24 / Temenos Transact | The bank's core banking system, which holds customers, accounts and transactions |
 | COB (Close of Business) | T24's end-of-day processing run |
 | Standby database / Data Guard | A continuously updated copy of the T24 database, kept for disaster recovery |
-| Active Data Guard | An Oracle option that lets the standby copy be read while it stays up to date; licensed on both the primary and the standby |
-| GoldenGate | Oracle software that copies selected data to another database; usually more expensive than Active Data Guard, so the last resort |
-| Operational data store / Temenos Data Hub | A reporting copy of T24 data that some banks already run; the service can read it instead of the standby |
+| Active Data Guard | An Oracle option that lets the standby copy be read while it stays up to date; an option only, not needed by this design |
+| Operational data store / Temenos Data Hub | A reporting copy of T24 data that some banks already run; the service can read it instead of the T24 database if the bank prefers |
 | STANDARD.SELECTION | T24's own list of the fields in each table; used to read fields by name, so upgrades don't break statements |
 | Booking date / value date | The date an entry was posted / the date it takes effect for interest; statements list entries by booking date |
 | Enquiry / STMT.ENT.BOOK | A T24 screen report run inside T24 Browser; STMT.ENT.BOOK is the standard enquiry that lists an account's entries by booking date, used today for ad-hoc statements |
@@ -762,3 +755,5 @@ The database account used on the standby is read-only and limited to the tables 
 | vCPU / GB RAM | Units of server processing power and memory |
 | DR (Disaster Recovery) | The secondary site used if the main data centre fails |
 | Java 21 | The programming platform the service is built on |
+| Oracle Resource Manager | A built-in Oracle Enterprise Edition feature that caps the CPU and sessions a database user can take |
+| Read-only transaction | A set of reads that all see the database as at one moment, even while other work changes it |

@@ -6,7 +6,7 @@ A proposal and a working MVP for **customer statement generation on T24 R21** (T
 
 A bank asked for statements that are faster and more reliable than the standard T24 route (`STMT.ENT.BOOK` plus T24 statement printing). They must cover individual and corporate customers, handle large volumes and reuse existing infrastructure where possible.
 
-The proposed answer is a separate **Statement Service**: one Java application (API, workers and scheduler roles) that runs beside T24. It reads T24's tables by primary key from a read-only copy of the database (Active Data Guard standby), builds statements, and delivers them through the bank's existing channels. Nothing is installed on T24 and nothing is written to it.
+The proposed answer is a separate **Statement Service**: one Java application (API, workers and scheduler roles) that runs beside T24. It reads T24's tables by primary key directly from the T24 database through one read-only user (load capped by Oracle Resource Manager; a read-only copy is optional), builds statements, and delivers them through the bank's existing channels. Nothing is installed on T24 and nothing is written to it.
 
 ## The two deliverables
 

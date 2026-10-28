@@ -12,6 +12,13 @@
   - the deployment and architecture diagrams show one Statement Service (API, workers and scheduler in one application);
   - production copies are now "sized after the benchmark";
   - the step-by-step build is now a flow diagram.
+- Rev 227, direct read instead of a copy:
+  - the service reads the T24 database directly through one read-only user, by primary key, never through the T24 application;
+  - Oracle Resource Manager caps its CPU and sessions;
+  - each statement is read in one short read-only transaction (one point in time), and today's entries come from `ACCT.ENT.TODAY`, so the intraday IRIS/OFS call is gone;
+  - bulk runs start after COB;
+  - Active Data Guard or a reporting copy is now optional (only if bank policy or the benchmark needs it), and GoldenGate was dropped;
+  - the risks, assumptions, open points, licences, network rules and diagrams were updated to match.
 
 **Project context**
 - Added `CLAUDE.md`, `context/` (overview, architecture, workflow rules, progress tracker) and two repo skills (`deploy-ssedev`, `sync-solution-doc`).
