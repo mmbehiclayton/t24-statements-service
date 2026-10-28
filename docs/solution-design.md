@@ -1,4 +1,4 @@
-> Exported from the Claude Doc on 28 Oct 2026 (rev 227). The Claude Doc is the master copy; re-export after changes.
+> Exported from the Claude Doc on 28 Oct 2026 (rev 236). The Claude Doc is the master copy; re-export after changes.
 
 # Customer Statement Generation Solution — T24 R21
 
@@ -220,7 +220,7 @@ Statements are only trusted if the edge cases are right. These rules are built i
 - **Closed and new accounts.** An account closed during the period is included up to its closing date; an account opened during the period starts from a zero opening balance. An account that cannot be read (for example, one held in another T24 company) is listed as skipped with the reason, never silently dropped.
 - **Several T24 companies.** T24 keeps separate tables for each company in a multi-company set-up. Each statement reads its account's own company tables and uses that company's branding.
 - **Narratives.** Each line shows the entry's own narrative and the description of its transaction code. Codes without a description show the code itself, and the Phase 1 analysis maps them so customers see the same wording as today.
-- **One point in time.** Each statement is read inside one short read-only transaction, so the opening balance, the entries and the closing balance all come from the same moment, even while T24 is posting or running COB. Bulk runs start only after the `DATES` record shows COB has finished.
+- **One cut-off moment.** Each statement is read as at one database moment (one SCN), across all of the customer's accounts, and that moment is printed on the statement as its cut-off, so the opening balance, the entries and the closing balance always agree. A transaction still processing at the cut-off appears on the next statement; today's entries are marked provisional. Bulk runs start only after the `DATES` record shows COB has finished.
 
 ## Why it outperforms the standard T24 solution
 
@@ -290,7 +290,7 @@ Requests, the staff console, statement building and scheduling all run inside on
 
 | Item | Investment |
 | --- | --- |
-| T24 database (read directly) | No new database and no copy. The service reads the T24 database through a read-only user (SELECT only on the listed tables), in UAT and in production; an Oracle Resource Manager limit caps its load |
+| T24 database (read directly) | No new database and no copy. The service reads the T24 database through a read-only user (SELECT and FLASHBACK, both read-only, on the listed tables only), in UAT and in production; an Oracle Resource Manager limit caps its load |
 | Service schema (jobs, audit, queue) | 10–20 GB for UAT on an existing non-core Oracle instance |
 
 **Why the service needs a small database of its own:** the service only reads T24 and never writes to it. It needs a place to keep its own working records: statement requests and their status, the waiting list of jobs, month-end run progress, an index of where each statement file is stored, customer statement preferences, reconciliation results, and the audit trail. The statement files themselves stay on the NAS, not in the database.
@@ -392,11 +392,12 @@ Phase 1 is a short proof: read-only access to the T24 database, a prototype, and
 | T24 table layout changes (upgrade or new local fields) | Wrong values on statements; direct table reads are outside Temenos support | Fields mapped by name from T24's field definitions (STANDARD.SELECTION), never by position; automated regression test after every T24 upgrade or local-field change |
 | Very large statement records on high-volume accounts | Slow reads, memory pressure | Records read in chunks and output streamed; heaviest accounts included in the Phase 1 benchmark |
 | Unclear transaction narratives | Poor corporate experience | Map transaction codes and narrative fields during design, validated with sample corporate customers |
+| A transaction is still processing when a statement is read | Customer asks why a payment made at the same moment is missing | Statement read as at one SCN with its cut-off time printed; uncommitted work is never shown; today's entries marked provisional and never stored; closed periods built after COB and final; the transaction appears on the next statement or a repeat request |
 
 ## Assumptions and dependencies
 
 - T24 R21 runs on Oracle (confirmed).
-- The bank can create a read-only database user on the T24 database (SELECT only on the listed tables) and an Oracle Resource Manager limit for it.
+- The bank can create a read-only database user on the T24 database (SELECT and FLASHBACK, both read-only, on the listed tables only) and an Oracle Resource Manager limit for it.
 - The bank has several million customers; production server and storage figures are sized from the Phase 1 benchmark, run in the UAT environment.
 - The existing API gateway, email, SFTP and SWIFT interfaces, file storage and container or app-server platform can host the new workload.
 - Archived statement entries are accessible for statements covering archived periods.
@@ -437,7 +438,7 @@ The sections above are written for business and management readers. The sections
 - **Very large records:** high-volume accounts can have very large `STMT.PRINTED` records (hundreds of thousands of entry IDs). The reader processes them in chunks and streams output, and the heaviest accounts are part of the Phase 1 benchmark.
 - **Load limits:** a bounded connection pool, worker throttling, bulk runs after COB, and the Resource Manager cap.
 
-**T24 tables the service reads.** The read-only database user is granted SELECT on these tables only, for each T24 company. In the database each table is named per company (for example `F<company mnemonic>_STMT_ENTRY`) and holds a record key plus `XMLRECORD`.
+**T24 tables the service reads.** The read-only database user is granted SELECT and FLASHBACK (both read-only; FLASHBACK lets it read a table as at one past moment) on these tables only, for each T24 company. In the database each table is named per company (for example `F<company mnemonic>_STMT_ENTRY`) and holds a record key plus `XMLRECORD`.
 
 | T24 table | Read by | Used for | In the tested build |
 | --- | --- | --- | --- |
@@ -457,7 +458,13 @@ The sections above are written for business and management readers. The sections
 
 ### 2. Consistent reads
 
-Each statement is read inside one short read-only transaction (SET TRANSACTION READ ONLY), so every table is seen as at one moment, even while T24 is posting or running COB: an entry is never counted twice or missed between the balance and the entry list. The transaction lasts under a second, so it puts no pressure on the database's undo space. Today's entries come from ACCT.ENT.TODAY in the same read, so no intraday call to T24 through IRIS or OFS is needed. Bulk runs start only after the DATES record shows COB has finished.
+Every statement has one cut-off moment. When a statement starts, the service takes the database's current system change number (SCN), and every read for that statement, for every account of the customer and on every worker thread, is a flashback query AS OF that SCN. The balances and the entries therefore show the database exactly as at that moment, even while T24 is posting or running COB: an entry is never counted twice, and never appears in the entry list while missing from the balance. A statement is read in seconds, well inside the database's undo retention. Today's entries come from ACCT.ENT.TODAY in the same snapshot, so no intraday call to T24 through IRIS or OFS is needed.
+
+- **Transactions still processing at the cut-off.** Oracle never shows work that is not yet committed. A posting that is still in progress when the statement is read, and finishes 20 seconds later, is not on that statement, just as it is not yet in T24's own balance enquiries. It is never lost: it carries its booking date and appears on every later statement covering that date.
+- **The cut-off is printed.** Every statement shows "Balances and entries as at \<date and time>" (the time of the SCN), so the customer and branch staff can see exactly what it covers.
+- **Today is provisional.** When the range includes today, today's entries are marked "provisional until end of day". Such statements are never stored; the next request is built afresh and includes anything committed since.
+- **Closed periods are final.** Month-end and other closed-period statements run only after the `DATES` record shows COB has finished, so nothing for that period is still processing. These are the statements that are stored, and they never change. An entry back-valued into a closed period is booked later, so it appears on the next statement, as in T24 today.
+- **Optional rule for official statements.** The bank can choose to end official statements at the last COB date and leave today's activity to internet banking and mini-statements, so a transaction in progress can never affect an issued statement.
 
 ### 3. Statement Service
 
@@ -492,7 +499,7 @@ The Statement Service is one codebase built as a multi-module Maven project, dep
 | --- | --- |
 | `statement-api` | REST endpoints, request validation, customer and account entitlement checks, sync/async routing; hosts the Statement Console |
 | `statement-core` | Statement model, customer-to-account resolution, opening and closing balance logic, consolidated multi-account and multi-currency statements |
-| `statement-t24-reader` | Key-based reads on the T24 database (read-only user) of the tables listed in Component design, section 1; field positions from `STANDARD.SELECTION`; parses `XMLRECORD`; one read-only transaction per statement |
+| `statement-t24-reader` | Key-based reads on the T24 database (read-only user) of the tables listed in Component design, section 1; field positions from `STANDARD.SELECTION`; parses `XMLRECORD`; every read of a statement AS OF one SCN |
 | `statement-render` | PDF (with password), Excel, CSV, MT940/942 and camt.053 writers, all streaming; customer summary pages |
 | `statement-delivery` | Adapters for download, email, SFTP and SWIFT, with retries; one delivery per customer |
 | `statement-worker` | Consumes queue jobs, generates and stores files, updates job status |
@@ -602,7 +609,7 @@ The service reads T24 data directly from the T24 database, so the statement path
 | Item | Type | Required? | Purpose |
 | --- | --- | --- | --- |
 | Drill-down on an existing customer or account enquiry | Enquiry configuration (a small routine only if the Browser/Explorer setup cannot open a URL) | Required | Opens the Statement Console with the customer or account pre-filled for branch staff |
-| Read-only database user on the T24 database | DBA task | Required | SELECT only, on the tables listed in Component design, section 1, for each T24 company the bank runs |
+| Read-only database user on the T24 database | DBA task | Required | SELECT and FLASHBACK (both read-only) only, on the tables listed in Component design, section 1, for each T24 company the bank runs |
 
 Not needed:
 
@@ -756,4 +763,4 @@ The database account used on the T24 database is read-only and limited to the ta
 | DR (Disaster Recovery) | The secondary site used if the main data centre fails |
 | Java 21 | The programming platform the service is built on |
 | Oracle Resource Manager | A built-in Oracle Enterprise Edition feature that caps the CPU and sessions a database user can take |
-| Read-only transaction | A set of reads that all see the database as at one moment, even while other work changes it |
+| Read-only transaction | A set of reads that all see the database as at one moment, even while other work changes it. The service does this with a flashback query: every read of a statement is made AS OF one SCN (Oracle's system change number, a point-in-time marker), so parallel workers share the same moment |

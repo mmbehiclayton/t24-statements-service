@@ -19,6 +19,12 @@
   - bulk runs start after COB;
   - Active Data Guard or a reporting copy is now optional (only if bank policy or the benchmark needs it), and GoldenGate was dropped;
   - the risks, assumptions, open points, licences, network rules and diagrams were updated to match.
+- Rev 236, transactions still processing at extraction time:
+  - every read of a statement, across all accounts and worker threads, is made `AS OF` one SCN, and that cut-off is printed ("Balances and entries as at …");
+  - uncommitted work is never shown, so a posting that finishes after the cut-off appears on the next statement or a repeat request;
+  - today's entries are marked provisional and such statements are never stored; closed periods are built after COB and are final;
+  - optional rule: official statements end at the last COB date;
+  - the read-only user is granted SELECT and FLASHBACK; a risk row was added.
 
 **Project context**
 - Added `CLAUDE.md`, `context/` (overview, architecture, workflow rules, progress tracker) and two repo skills (`deploy-ssedev`, `sync-solution-doc`).
