@@ -4,6 +4,46 @@ A standalone, read-only service that produces customer statements straight from 
 
 The data on ssedev is the T24 **R25 model bank**: test data only, with no real customers. Statement history starts on 17 Mar 2025.
 
+## How it works
+
+Every T24 table is read through JDBC with plain `SELECT`s by `RECID` (TAFJ layout: `RECID` + `XMLRECORD`). Company tables are named `F<mnemonic>_<APPLICATION>`, so with the default company `BNK`, `STMT.ENTRY` is `FBNK_STMT_ENTRY`. Field numbers are never hard-coded: they are looked up by name in `F_STANDARD_SELECTION` and cached, so a T24 upgrade that moves a field is picked up automatically.
+
+### Statement for one account
+
+| Step | Table | Read by | What it gives |
+|---|---|---|---|
+| 1 | `FBNK_ACCOUNT` | account id | Header (title, short title, currency, category, customer, company) and the live balance `ONLINE.ACTUAL.BAL` |
+| 2 | `FBNK_STMT_PRINTED` | RECID range `<account>-<from date>` to `<account>-99999999` | One record per printed statement period, each listing its `STMT.ENTRY` ids |
+| 3 | `FBNK_ACCT_ENT_TODAY` | account id | Entry ids booked but not yet printed on a statement |
+| 4 | `FBNK_STMT_ENTRY` | entry ids, in chunks of 500 | The entries: booking and value date, amount (FCY, else LCY), transaction code, narrative, references, reversal marker |
+| 5 | `FBNK_STMT_ENTRY$ARC` | ids not found in step 4 | Archived entries (only if the table exists) |
+| 6 | `FBNK_TRANSACTION` | transaction code | The transaction's narrative, used as the line description (cached) |
+
+The balances are worked back from the live balance, not read from a stored figure:
+
+- **Closing** = live balance − entries booked after the *To* date.
+- **Opening** = closing − entries booked inside the period.
+- Lines are sorted by booking date, then value date, then entry id, with a running balance from the opening.
+
+The page's full-history check reads every `STMT.PRINTED` period, from `<account>-00000000` on, and compares the sum of all entries with the live balance. Customer statements and batch runs skip that check.
+
+### Statement for a customer (all accounts)
+
+1. `FBNK_CUSTOMER_ACCOUNT` (id = customer) lists the customer's accounts.
+2. `FBNK_CUSTOMER` gives the name (`NAME.1`, else `SHORT.NAME`).
+3. Each account's statement is built exactly as above. Accounts missing from `FBNK_ACCOUNT` (closed, or in another company) are listed as skipped.
+4. Accounts are grouped by currency, and opening, debits, credits and closing are totalled per currency. Different currencies are never added together.
+
+### Batch run
+
+The batch picks the accounts with the most `FBNK_STMT_PRINTED` periods (or uses a given list), builds each account statement on a worker pool and writes a PDF and a CSV per account to a `batch-<timestamp>` folder.
+
+### Demo helpers
+
+- **Account chips** (`/api/accounts`) group `FBNK_STMT_PRINTED` by account and rank by number of periods.
+- **Customer chips** (`/api/customers`) scan `FBNK_CUSTOMER_ACCOUNT` once and keep customers with two or more accounts that have statement history.
+- **Companies** are found by listing the `F*_STMT_PRINTED` tables.
+
 ## Opening the page
 
 **Easiest: the tunnel script (no password to type)**

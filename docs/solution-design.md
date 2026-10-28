@@ -1,8 +1,10 @@
-> Exported from the Claude Doc on 27 Oct 2026 (rev 121). The Claude Doc is the master copy; re-export after changes.
+> Exported from the Claude Doc on 28 Oct 2026 (rev 129). The Claude Doc is the master copy; re-export after changes.
 
 # Customer Statement Generation Solution — T24 R21
 
 Oct 27, 2026 · @Clayton
+
+**Solution proposal** for review by the bank's business, IT, T24, DBA, network and security teams.
 
 ## Executive summary
 
@@ -110,7 +112,7 @@ Think of T24 as the bank's busy main office. Today, every statement request is h
 2. **The Statement Service takes the request:** a new application running beside T24, not inside it.
 3. **It reads the records from the copy:** the bank already keeps a standby copy of the T24 database for disaster recovery, updated within seconds. The service reads from that copy, so live T24 is not slowed down.
 4. **It builds the statement:** all of the customer's accounts in one document, with balances checked against T24 before release.
-5. **It delivers it:** download, email, SFTP for corporates, or SWIFT, using channels the bank already has. A copy is kept, so asking again for the same past month is instant.
+5. **It delivers it:** download or email in the first release, and SFTP or SWIFT for corporates in a later phase, using channels the bank already has. A copy is kept, so asking again for the same past month is instant.
 
 ### What changes for each group
 
@@ -139,6 +141,76 @@ The solution must:
 4. Scale with transaction growth without degrading T24 online or COB performance.
 5. Provide auditability and security for every statement produced.
 
+## Why not use STMT.ENT.BOOK
+
+`STMT.ENT.BOOK` is the standard T24 enquiry that lists an account's statement entries by booking date. Staff run it in T24 Browser today, and it is the main way the bank produces ad-hoc statements. It works well for short date ranges on ordinary accounts. It struggles in exactly the cases this proposal is about: long ranges, busy accounts and customers with many accounts.
+
+**Why it slows down and times out**
+
+- **It runs inside T24.** The enquiry runs on the T24 application servers, in the user's Browser session, using the same servers and database connections that process live banking. Every long statement takes capacity from tellers, channels and the close of business (COB).
+- **It builds every line through the enquiry layer.** For each entry, T24 runs the enquiry's selection, field conversions and any local routines. On an account with tens of thousands of entries a year, that work grows with every line.
+- **It assembles the whole result before showing it.** A 12-month range on a busy account can run past the Browser or application-server timeout. The user then gets nothing at all, not a partial statement, and the work done so far is lost.
+- **It has no queue and no protection.** One account, one request at a time, results paged for the screen. When many staff run long statements at once, for example at month end or for audit requests, the load lands directly on the core.
+
+**What it cannot do**
+
+- One statement across all of a customer's accounts, with totals per currency.
+- Bank-branded PDF or Excel output; its output is meant for the screen or a printer.
+- Batch generation, scheduling or stored copies: the same statement is rebuilt every time it is asked for.
+- Delivery to internet banking, email or corporate systems.
+
+**Why tuning it is not enough**
+
+New indexes, longer timeouts or more T24 application servers can push the limit further out, but the work still runs inside T24, on the core's capacity, and every line is still rebuilt on every request. Changing the enquiry or its routines also adds local code to carry through every T24 upgrade.
+
+**How the Statement Service differs**
+
+|  | STMT.ENT.BOOK enquiry | Statement Service |
+| --- | --- | --- |
+| Where it runs | Inside T24, on the core application servers | On its own server, outside T24 |
+| Database it reads | The live T24 database | A read-only copy: the Active Data Guard standby or an existing reporting copy |
+| How it finds entries | Enquiry selection and per-line processing | Direct reads by the same keys T24 uses, in batches |
+| Long ranges on busy accounts | Can time out and return nothing | Reads only the entries in the range; heaviest accounts tested in the Phase 1 benchmark |
+| Customer with many accounts | One account at a time | One statement across all accounts, totals per currency |
+| Output | Screen or printer | PDF and Excel (CSV for data); bank file formats later |
+| Repeat requests | Rebuilt every time | Closed periods built once and served from storage |
+| Effect on live banking | Shares the core's capacity | None on the primary; bulk reads pause if the standby falls behind |
+
+**Same figures, different route.** The service reads the same records that the enquiry and T24's own statement printing use: `ACCOUNT`, `ACCT.STMT.PRINT`, `STMT.PRINTED` and `STMT.ENTRY`. It does not calculate anything T24 has not already booked; it reads the booked entries faster and outside the core. That is why the Phase 1 benchmark compares its statements line by line with `STMT.ENT.BOOK` and with T24's printed statements. The enquiry itself stays available to staff, unchanged.
+
+## How the service builds a statement, step by step
+
+This is what happens when someone asks for a statement, for example a branch officer asking for a customer's statement from 1 January to 31 March across all of the customer's accounts. Internet banking requests and scheduled runs follow the same steps. Every step only reads; nothing is ever written to T24.
+
+1. **Check the request.** The API gateway authenticates the caller (a channel or a staff member). The service checks the customer, the dates and the caller's rights. If this exact closed-period statement was built before, the stored copy is returned straight away.
+2. **Find the accounts.** `CUSTOMER.ACCOUNT` lists every account the customer holds, and `CUSTOMER` gives the name and address. For a single-account request this step is skipped.
+3. **Read each account.** `ACCOUNT` gives the title, currency, category and current balance.
+4. **Find the entry ids.** For each account and statement period, T24 keeps a `STMT.PRINTED` record that lists the ids of every entry in that period. The service reads only the periods that overlap the requested dates, by key (account and date), including the current open period. Entries booked today and not yet in any period come from `ACCT.ENT.TODAY`.
+5. **Fetch the entries.** `STMT.ENTRY` records are read by id, a few hundred at a time. Ids not found in the live table are looked up in the archive tables, so old periods still work.
+6. **Work out the balances.** Each entry has a booking date, a value date and a signed amount. The opening and closing balances are calculated from a known balance (see below), and a running balance is shown on every line. Lines are listed by booking date, then value date.
+7. **Add descriptions.** Each line gets its narrative from the entry and the description of its transaction code from `TRANSACTION`, plus the bank's local narrative rules carried over in Phase 1. Descriptions are cached, so each code is read once.
+8. **Total per currency.** For a multi-account statement, accounts are grouped by currency, and the opening balance, debits, credits and closing balance are totalled per currency. Different currencies are never added together.
+9. **Produce the file.** The statement is rendered as a PDF (bank template, optional password), an Excel file or a CSV. Large statements are written page by page, so memory use stays flat.
+10. **Store and deliver.** A closed-period statement is stored for the retention period and recorded in the audit trail, then returned to the caller or sent by email.
+
+Many statements are built side by side on a pool of workers, so throughput grows with the number of workers instead of with the length of the queue.
+
+**How the balances are worked out and checked**
+
+The service never stores or invents a balance. It derives the balances from T24's own figures in two independent ways, and they must agree:
+
+- **Back from the current balance** (used in the tested build): closing balance = the account's current balance in `ACCOUNT` minus everything booked after the end date; opening balance = closing balance minus everything booked inside the period.
+- **Forward from the last statement** (added for production): `ACCT.STMT.PRINT` holds the balance at each statement date; opening balance = the balance at the last statement date before the start date plus the entries booked between that date and the start date.
+
+If the two disagree, the statement is held and flagged to operations instead of being released, so a missing or archived entry can never produce a wrong statement without anyone noticing.
+
+**Why it is fast**
+
+- Every read is by primary key, the way T24 itself reads its tables: no table scans and no new indexes.
+- Only the periods and entries inside the requested range are read.
+- Field positions are looked up once from `STANDARD.SELECTION` and cached, so fields are read by name without per-line overhead.
+- The work runs on the service's own server, against a read-only copy of the database, so it neither waits for nor slows down live banking.
+
 ## Why it outperforms the standard T24 solution
 
 The proposed service is faster because it removes statement building from the T24 application and parallelizes it; it is more reliable because a slow statement no longer competes with live banking.
@@ -164,7 +236,7 @@ The proposed service is faster because it removes statement building from the T2
 
 ### Proving it before full build
 
-Phase 1 includes a side-by-side benchmark on a sample of the bank's highest-volume accounts plus a random sample of retail accounts. The sample includes customers with the most accounts. Statements for 1, 3 and 12 months are produced through the standard T24 solution and through the prototype, measuring response time, success rate and load on T24. The pass mark is set before the benchmark runs: the prototype must be faster than the standard solution on every sampled account, succeed on every account where the standard solution times out, and produce a 12-month statement for the heaviest account within \_\_\_ seconds. Full build proceeds only once the prototype meets it.
+Phase 1 includes a side-by-side benchmark on a sample of the bank's highest-volume accounts plus a random sample of retail accounts. The sample includes customers with the most accounts. Statements for 1, 3 and 12 months are produced through the standard T24 solution (the STMT.ENT.BOOK enquiry and T24's statement printing) and through the prototype, measuring response time, success rate and load on T24. The pass mark is set before the benchmark runs: the prototype must be faster than the standard solution on every sampled account, succeed on every account where the standard solution times out, and produce a 12-month statement for the heaviest account within \_\_\_ seconds. Full build proceeds only once the prototype meets it.
 
 ## Options considered
 
@@ -347,7 +419,7 @@ The sections above are written for business and management readers. The sections
 ### 1. Data layer: T24 database read replica
 
 - **Preferred: the existing Data Guard standby, opened read-only (Active Data Guard).** T24 Oracle installations normally already run a standby for DR. With Active Data Guard, that standby serves reads while it keeps applying changes, so the service gets near real-time data with no load on the primary and no new database.
-- **Access pattern:** reads follow the same keys T24 uses. `ACCT.STMT.PRINT` gives the statement dates and the balance at each one; `STMT.PRINTED` gives the `STMT.ENTRY` IDs of each closed statement period. These records exist only at statement-frequency dates, so a request for any other date range starts from the nearest statement date or balance snapshot before it and adds entries forward from there. Entries of the current open period are not in `STMT.PRINTED` yet and are read from T24's open-period entry records (exact tables agreed in the data-mapping workshop). Entries are fetched by primary key in batches. No new indexes or objects are created on T24 tables.
+- **Access pattern:** reads follow the same keys T24 uses. `ACCT.STMT.PRINT` gives the statement dates and the balance at each one; `STMT.PRINTED` gives the `STMT.ENTRY` IDs of each statement period. These records exist only at statement-frequency dates, so a request for any other date range reads the periods that overlap it and keeps only the entries inside the range. Entries of the current open period are listed in the open period's `STMT.PRINTED` record, which T24 keeps under the next statement date, and entries booked today come from `ACCT.ENT.TODAY`. The tested build reads both; the bank's set-up is confirmed in the data-mapping workshop. Entries are fetched by primary key in batches. No new indexes or objects are created on T24 tables.
 - **Fallback: a copy the bank already runs.** If Active Data Guard is not licensed, or the DR standby must stay closed, the service reads an existing reporting copy of T24 instead: a reporting replica, an operational data store, or Temenos Data Hub. Only if none exists does GoldenGate replicate the needed tables into a new schema on an existing non-core Oracle instance. GoldenGate is usually more expensive than Active Data Guard, so it is the last resort and the only case where new data-layer capacity is needed.
 - **Archived entries:** in R21, T24's archiving moves old STMT.ENTRY records out of the live tables into archive tables (the $ARC copies of the entry and statement files, or a separate archive database, depending on how the bank set it up). When a requested period falls before the archive cut-off date, the reader reads those archive tables by the same keys. The exact tables and the cut-off date are agreed in the data-mapping workshop, and coverage is tested in the Phase 1 benchmark.
 - **Field mapping:** reading T24 tables directly is outside Temenos support, so the service maps fields inside `XMLRECORD` by name, using T24's own field definitions (`STANDARD.SELECTION`), never by position. An automated regression test compares sample statements with T24 after every T24 upgrade or local-field change.
@@ -570,7 +642,7 @@ The stack uses mainstream, open-source Java components so no new licences are ne
 | Database access | Oracle JDBC (ojdbc11) with HikariCP connection pooling | Native Oracle driver; pooled, bounded connections to the standby |
 | T24 record parsing | StAX streaming XML parser | Reads `XMLRECORD` without loading whole records into memory |
 | Job queue | Oracle Advanced Queuing via Spring JMS | Included with Oracle; transactional with the service schema |
-| PDF | JasperReports templates, Apache PDFBox for password protection | Bank-branded templates; standard PDF encryption |
+| PDF | OpenPDF (used in the tested build) or JasperReports templates; Apache PDFBox for password protection | Bank-branded templates; standard PDF encryption |
 | Excel and CSV | Apache POI (streaming SXSSF), OpenCSV | Writes very large statements with flat memory use |
 | SWIFT and ISO 20022 | Prowide Core (MT940/942), Prowide ISO 20022 (camt.053) | Open-source, standards-validated message builders |
 | Intraday T24 call | IRIS REST client or OFS over TWS (SOAP) | Uses T24's existing integration layer |
@@ -641,6 +713,13 @@ The database account used on the standby is read-only and limited to the tables 
 | Operational data store / Temenos Data Hub | A reporting copy of T24 data that some banks already run; the service can read it instead of the standby |
 | STANDARD.SELECTION | T24's own list of the fields in each table; used to read fields by name, so upgrades don't break statements |
 | Booking date / value date | The date an entry was posted / the date it takes effect for interest; statements list entries by booking date |
+| Enquiry / STMT.ENT.BOOK | A T24 screen report run inside T24 Browser; STMT.ENT.BOOK is the standard enquiry that lists an account's entries by booking date, used today for ad-hoc statements |
+| STMT.ENTRY | T24's table of account entries: one record per debit or credit, with booking date, value date, amount and narrative |
+| STMT.PRINTED | One record per account and statement period, listing the ids of the entries in that period |
+| ACCT.STMT.PRINT | One record per account, holding its statement dates and the balance at each one |
+| ACCT.ENT.TODAY | The ids of an account's entries booked today, before they are added to a statement period |
+| XMLRECORD | The column in which T24 stores each record's fields in its Oracle tables; the service reads fields from it by name |
+| Archive tables ($ARC) | Where T24's archiving moves old entries; the service reads them when a period falls before the archive cut-off |
 | Statement Service | The new application that builds and delivers statements |
 | Statement Console | The new internal web screen for branch and operations staff |
 | API | A secure, standard way for one system (e.g. mobile banking) to ask another for something |
