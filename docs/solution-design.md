@@ -1,4 +1,4 @@
-> Exported from the Claude Doc on 28 Oct 2026 (rev 129). The Claude Doc is the master copy; re-export after changes.
+> Exported from the Claude Doc on 28 Oct 2026 (rev 142). The Claude Doc is the master copy; re-export after changes.
 
 # Customer Statement Generation Solution — T24 R21
 
@@ -22,7 +22,9 @@ Key commitments:
 - **Existing infrastructure first:** the database replica, job queue, file storage, gateways and delivery channels reuse what the bank already runs. The only new component is compute for the service itself, justified below.
 - **Focused first release:** on-demand PDF and Excel statements for individual and corporate customers through branches and internet banking, plus scheduled e-statements. Corporates get consolidated statements across all their accounts from day one. Bank file formats for corporates (SWIFT MT940/942, camt.053, SFTP), large bulk runs and serving other T24 databases follow in later phases, once the first release has proven itself.
 
-**How to read this document:** Part 1 (up to *Open points and next steps*) explains the solution, benefits, investment and rollout in plain language. Part 2 holds the technical design for IT teams. Technical terms are explained in the Glossary at the end.
+**What the bank is asked to approve now:** Phase 1 only: one UAT server, a read-only database user on the T24 UAT database, and the side-by-side benchmark against the standard T24 solution. Full build goes ahead only if the benchmark meets the pass mark.
+
+**How to read this document:** Part 1 (up to *Open points and next steps*) is written for management and business readers: the problem, why this solution, the infrastructure it needs and how it goes live. Two sections in Part 1 also set out the logic for technical readers: *Why not use STMT.ENT.BOOK* and *How the service builds a statement, step by step*. Part 2 holds the full technical design for the bank's IT, T24, DBA, network and security teams. Technical terms are explained in the Glossary at the end.
 
 ## Why choose this solution
 
@@ -56,7 +58,7 @@ Staff keep starting from T24 Browser; only the building of the statement moves o
 | Concern | Built inside T24 (Browser screens, enquiries, local routines) | This solution |
 | --- | --- | --- |
 | Effect on live banking | Every statement runs on the T24 application servers and the live database, next to teller, channel and COB work | Runs on its own server and reads a database copy; live banking is not touched |
-| Large accounts and long periods | The enquiry builds each line through the T24 application; long ranges on busy accounts are slow and hit Browser session timeouts | Reads entries by key and streams the output; a 12-month statement on a busy account is one fast read |
+| Large accounts and long periods | The enquiry builds each line through the T24 application; long ranges on busy accounts are slow and hit Browser session timeouts | Reads entries by key and streams the output; only the entries inside the requested range are read, so long ranges on busy accounts do not time out |
 | Corporates with many accounts | One enquiry per account, assembled by hand | One request returns all of a customer's accounts, with totals per currency, in one PDF or Excel file |
 | Month-end bulk | Tied to COB jobs and the end-of-day window | Runs after COB on the database copy, in parallel, at any time of day |
 | Growing capacity | More T24 application capacity, inside the core change process | Add workers to the statement server; T24 is unchanged |
@@ -64,7 +66,7 @@ Staff keep starting from T24 Browser; only the building of the statement moves o
 | Making changes | Every template or format change is a T24 change with COB regression testing | Template and format changes are configuration on the statement server |
 | Output | Screen or print view; PDF only through Delivery mapping | PDF, Excel and CSV now; MT940/942 and camt.053 later |
 
-What stays in T24: the Browser drill-down that opens the statement for a customer or account, statement frequencies, and SWIFT MT940/942. The T24 change is limited to that drill-down and a read-only database user (see T24 changes).
+What stays in T24: the Browser drill-down that opens the statement for a customer or account, the statement frequencies in `ACCOUNT.STATEMENT`, the `STMT.ENT.BOOK` enquiry (unchanged and still available to staff), and the SWIFT MT940/942 messages T24 already sends. The service can take over those SWIFT messages in a later phase if the bank chooses. The T24 change is limited to the drill-down and a read-only database user (see T24 changes).
 
 ### Already tested
 
@@ -120,7 +122,7 @@ Think of T24 as the bank's busy main office. Today, every statement request is h
 | --- | --- |
 | Customers | Faster, consistent statements in internet and mobile banking and by email; one statement covering all their accounts |
 | Branch staff | A statement button from the T24 customer or account screen; print or email in seconds |
-| Corporate clients | Consolidated statements across all their accounts, plus files in standard banking formats (MT940, camt.053) |
+| Corporate clients | Consolidated statements across all their accounts, plus files in standard banking formats (MT940, camt.053) in a later phase |
 | Operations | A Statement Console to monitor month-end runs, fix failures and re-send statements |
 | IT | A new service on existing platforms; no changes to how T24 itself runs |
 
@@ -137,7 +139,7 @@ The solution must:
 
 1. Generate accurate statements for any requested period, including archived history.
 2. Serve individual and corporate customers, including multi-account and multi-currency statements.
-3. Deliver through all channels: branch, internet and mobile banking, email, SFTP and SWIFT.
+3. Deliver through all channels: branch, internet and mobile banking and email, and for corporates SFTP and SWIFT (these two in a later phase).
 4. Scale with transaction growth without degrading T24 online or COB performance.
 5. Provide auditability and security for every statement produced.
 
@@ -183,7 +185,7 @@ New indexes, longer timeouts or more T24 application servers can push the limit 
 This is what happens when someone asks for a statement, for example a branch officer asking for a customer's statement from 1 January to 31 March across all of the customer's accounts. Internet banking requests and scheduled runs follow the same steps. Every step only reads; nothing is ever written to T24.
 
 1. **Check the request.** The API gateway authenticates the caller (a channel or a staff member). The service checks the customer, the dates and the caller's rights. If this exact closed-period statement was built before, the stored copy is returned straight away.
-2. **Find the accounts.** `CUSTOMER.ACCOUNT` lists every account the customer holds, and `CUSTOMER` gives the name and address. For a single-account request this step is skipped.
+2. **Find the accounts.** `CUSTOMER.ACCOUNT` lists the accounts the customer owns; the full build adds joint accounts and accounts closed during the period. `CUSTOMER` gives the name and address. For a single-account request this step is skipped.
 3. **Read each account.** `ACCOUNT` gives the title, currency, category and current balance.
 4. **Find the entry ids.** For each account and statement period, T24 keeps a `STMT.PRINTED` record that lists the ids of every entry in that period. The service reads only the periods that overlap the requested dates, by key (account and date), including the current open period. Entries booked today and not yet in any period come from `ACCT.ENT.TODAY`.
 5. **Fetch the entries.** `STMT.ENTRY` records are read by id, a few hundred at a time. Ids not found in the live table are looked up in the archive tables, so old periods still work.
@@ -211,6 +213,21 @@ If the two disagree, the statement is held and flagged to operations instead of 
 - Field positions are looked up once from `STANDARD.SELECTION` and cached, so fields are read by name without per-line overhead.
 - The work runs on the service's own server, against a read-only copy of the database, so it neither waits for nor slows down live banking.
 
+**The fine details the service gets right**
+
+Statements are only trusted if the edge cases are right. These rules are built in, and most were exercised in the tested build:
+
+- **The account's own currency.** For a foreign-currency account the amount comes from the entry's foreign-currency field (`AMOUNT.FCY`); for a local-currency account from `AMOUNT.LCY`. One account statement never mixes currencies, and customer totals are kept per currency.
+- **Booking date decides the period.** An entry belongs to the period in which it was booked, whatever its value date. A back-valued entry booked in April for a March value date appears in April, with its value date shown, so the statement agrees with T24's balances. An entry booked after the end date is left out of the closing balance even if its value date falls inside the period.
+- **Reversals.** A reversed entry and its reversal both appear, the reversal marked as such, so the statement matches T24's books and the pair nets to zero.
+- **A fixed order.** Lines are sorted by booking date, then value date, then entry ID. The same statement printed twice has the same order and the same running balances.
+- **No double counting.** An entry listed both in the open period's `STMT.PRINTED` record and in `ACCT.ENT.TODAY` is counted once.
+- **Missing entries are never ignored.** An entry ID that T24 lists but that is found in neither the live nor the archive tables is counted, and the statement is held for operations instead of being released with a gap.
+- **Accounts with no movement.** They still appear on a customer statement, with the opening balance equal to the closing balance and no lines, so the customer sees every account.
+- **Closed and new accounts.** An account closed during the period is included up to its closing date; an account opened during the period starts from a zero opening balance. An account that cannot be read (for example, one held in another T24 company) is listed as skipped with the reason, never silently dropped.
+- **Several T24 companies.** T24 keeps separate tables for each company in a multi-company set-up. Each statement reads its account's own company tables and uses that company's branding.
+- **Narratives.** Each line shows the entry's own narrative and the description of its transaction code. Codes without a description show the code itself, and the Phase 1 analysis maps them so customers see the same wording as today.
+
 ## Why it outperforms the standard T24 solution
 
 The proposed service is faster because it removes statement building from the T24 application and parallelizes it; it is more reliable because a slow statement no longer competes with live banking.
@@ -223,8 +240,8 @@ The proposed service is faster because it removes statement building from the T2
 | Month-end bulk runs | Inside the COB window, competing with end-of-day jobs | After COB on the replica, at any time of day |
 | Repeat requests | Rebuilt every time | Recent closed periods served from storage; older ones rebuilt quickly |
 | Failures | Rerun the enquiry or the batch job | Per-account retry from the queue; one failure never stops a run |
-| Load on T24 primary | Grows with every statement | Near zero: one small intraday call per request |
-| Output | Delivery module formats, limited PDF | PDF, Excel, MT940/942, camt.053 |
+| Load on T24 primary | Grows with every statement | None from statement reads; only an optional small intraday call when to-the-second balances are required |
+| Output | Delivery module formats, limited PDF | PDF, Excel and CSV; MT940/942 and camt.053 in a later phase |
 
 ### Built for very large account volumes
 
@@ -244,7 +261,7 @@ A replica-backed Statement Service is the only option that meets all objectives 
 
 | Option | How it works | Strengths | Limitations | Role in solution |
 | --- | --- | --- | --- | --- |
-| 1. Standard T24 statements (current) | `ACCOUNT.STATEMENT` frequencies, COB generation, enquiries, Delivery module output | Already in place; T24 balance logic; MT940/950 for SWIFT | Slow at high volumes, shares T24 capacity, tied to COB, rigid output | Retained for statement frequencies and SWIFT MT940/942 |
+| 1. Standard T24 statements (current) | `ACCOUNT.STATEMENT` frequencies, COB generation, enquiries, Delivery module output | Already in place; T24 balance logic; MT940/942 for SWIFT | Slow at high volumes, shares T24 capacity, tied to COB, rigid output | Retained for statement frequencies and SWIFT MT940/942 |
 | 2. Tuned enquiry over IRIS/OFS | Optimized enquiry exposed to a rendering service | Real-time, branded output | Still runs inside T24; long ranges strain production | Used only for today's entries |
 | 3. Replica-backed Statement Service | Service reads by key from a T24 database replica and generates in parallel | No T24 application load, any range, scales out, reuses existing standby | Needs reconciliation and replica access | **Recommended core** |
 | 4. Third-party CCM engine | Vendor platform templates and delivers extracts | Polished output, archiving | Licence cost, new infrastructure, still needs a data source | Not proposed; can be added later for templating |
@@ -407,6 +424,7 @@ The following should be confirmed with the business to finalize sizing and scope
 - [ ] Whether the bank already licenses a Temenos statement or e-statement module that could meet part of the need
 - [ ] Which customers subscribe to e-statements (they, with corporates, are the only ones pre-generated)
 - [ ] Whether statements should follow booking date (recommended) or value date
+- [ ] How T24 archiving is set up at the bank (archive tables or a separate archive database) and the archive cut-off date
 
 Once confirmed, the next step is a short design workshop with the T24, DBA and infrastructure teams to agree the data mapping and environment setup for Phase 1.
 
@@ -426,15 +444,33 @@ The sections above are written for business and management readers. The sections
 - **Very large records:** high-volume accounts can have very large `STMT.PRINTED` records (hundreds of thousands of entry IDs). The reader processes them in chunks and streams output, and the heaviest accounts are part of the Phase 1 benchmark.
 - **DR comes first:** bulk reads pause automatically when standby lag passes an agreed threshold and resume when it recovers, so statement load never delays the standby's DR role.
 
+**T24 tables the service reads.** The read-only database user is granted SELECT on these tables only, for each T24 company. In the database each table is named per company (for example `F<company mnemonic>_STMT_ENTRY`) and holds a record key plus `XMLRECORD`.
+
+| T24 table | Read by | Used for | In the tested build |
+| --- | --- | --- | --- |
+| `CUSTOMER` | Customer number | Name and address on the statement | Yes |
+| `CUSTOMER.ACCOUNT` | Customer number | The accounts the customer owns | Yes |
+| `JOINT.CONTRACTS.XREF` | Customer number | Accounts the customer holds jointly | Added in build |
+| `ACCOUNT` | Account number | Title, currency, category, company and current balance (`ONLINE.ACTUAL.BAL`) | Yes |
+| Closed-account records | Account number | Accounts closed during the period (exact table confirmed in the workshop) | Added in build |
+| `ACCT.STMT.PRINT` | Account number | Statement dates and the balance at each one: the forward anchor | Added in build |
+| `STMT.PRINTED` | Account number and statement date | Entry IDs for each statement period, including the open period | Yes |
+| `ACCT.ENT.TODAY` | Account number | IDs of entries booked today | Yes |
+| `STMT.ENTRY` and its archive tables | Entry ID | The entries themselves | Yes |
+| `TRANSACTION` | Transaction code | Line descriptions | Yes |
+| `ACCOUNT.STATEMENT` | Account number | Statement frequency, for scheduled runs | Added in build |
+| `DATES` | Company | Current business date and COB completion | Added in build |
+| `STANDARD.SELECTION` | Table name | Field names and positions, so every field is read by name | Yes |
+
 ### 2. Intraday top-up
 
 With Active Data Guard the replica lags production by seconds, so an intraday call is only needed if the bank requires to-the-second balances. In the GoldenGate fallback, or when exact real-time is required, today's entries are read live from T24 through IRIS or OFS: a small, bounded query with negligible impact.
 
 ### 3. Statement Service
 
-- Stateless Spring Boot service, deployed as multiple instances behind a load balancer.
+- Spring Boot service that keeps no state in memory between requests, so any copy can serve any request: one instance in UAT, two identical instances behind the bank's load balancer in production.
 - **Sync API** for small requests (indicatively up to 3 months or 5,000 entries); **async queue** (Oracle Advanced Queuing, included with the bank's Oracle database, or the bank's existing message broker) for large ranges, bulk and scheduled runs, with a notification when ready.
-- Opening balances are anchored on T24's own figures, never rebuilt by summing all history: the service takes the balance at the nearest statement date or balance snapshot before the requested start, then adds entries up to the start and through to the end date. Statements follow booking date (the date an entry was posted), with value date shown as a column, so back-valued items appear when they were booked and totals still agree with T24. The bank confirms this rule in the design workshop.
+- Balances are derived from T24's own figures in two independent ways that must agree: back from the account's current balance in `ACCOUNT` (closing = current balance minus entries booked after the end date), and forward from the balance at the last statement date in `ACCT.STMT.PRINT` on or before the start. History is never summed from the account's first entry. Statements follow booking date (the date an entry was posted), with value date shown as a column, so back-valued items appear when they were booked and totals still agree with T24. The bank confirms this rule in the design workshop.
 - Handles multi-currency accounts, joint accounts and combined multi-account corporate statements.
 
 ### 4. Output formats
@@ -449,7 +485,7 @@ Branch UI, internet and mobile banking download, password-protected email, SFTP 
 
 ### 6. Controls
 
-- **Nightly reconciliation:** the statement closing balance must equal the T24 balance for every account; any break blocks statement release for that account and raises an alert.
+- **Nightly reconciliation:** the statement closing balance must equal the T24 balance for every account; any break blocks statement release for that account and raises an alert. Every statement is also checked as it is built: the two balance anchors must agree and no listed entry may be missing, otherwise the statement is held.
 - **Audit log:** who requested which statement, for which period, through which channel.
 - **Data protection:** PDF password policy, masking where required, encryption in transit and at rest.
 
@@ -463,7 +499,7 @@ The Statement Service is one codebase built as a multi-module Maven project, dep
 | --- | --- |
 | `statement-api` | REST endpoints, request validation, customer and account entitlement checks, sync/async routing; hosts the Statement Console |
 | `statement-core` | Statement model, customer-to-account resolution, opening and closing balance logic, consolidated multi-account and multi-currency statements |
-| `statement-t24-reader` | Key-based reads on the T24 standby (`CUSTOMER`, `CUSTOMER.ACCOUNT`, joint-holder cross-reference, `ACCOUNT`, closed-account records, `ACCT.STMT.PRINT`, `STMT.PRINTED`, `STMT.ENTRY`); parses `XMLRECORD`; optional IRIS/OFS intraday call |
+| `statement-t24-reader` | Key-based reads on the T24 standby of the tables listed in Component design, section 1; field positions from `STANDARD.SELECTION`; parses `XMLRECORD`; optional IRIS/OFS intraday call |
 | `statement-render` | PDF (with password), Excel, CSV, MT940/942 and camt.053 writers, all streaming; customer summary pages |
 | `statement-delivery` | Adapters for download, email, SFTP and SWIFT, with retries; one delivery per customer |
 | `statement-worker` | Consumes queue jobs, generates and stores files, updates job status |
@@ -520,8 +556,8 @@ Totals are shown per currency; currencies are never summed together unless the b
 1. Request validated; caller's entitlement to the customer and accounts checked; for a customer-level request, the customer's accounts are resolved.
 2. If the period is closed and already generated, the stored file is returned immediately.
 3. Otherwise the router decides: small request runs synchronously, large or corporate request becomes a queued job.
-4. Reader finds the last statement date in `ACCT.STMT.PRINT` (or balance snapshot) on or before the requested start and takes its balance, gets entry IDs for closed periods from `STMT.PRINTED` and for the open period from T24's open-period entry records, then fetches `STMT.ENTRY` records by primary key in batches (from the archive tables for archived periods) and rolls the balance forward to the requested start and end dates by booking date.
-5. Core builds the statement: running balance, narratives from transaction codes, closing balance checked against T24.
+4. Reader takes the account's current balance from `ACCOUNT`, and the last statement date and balance on or before the requested start from `ACCT.STMT.PRINT`. It gets entry IDs from the `STMT.PRINTED` records that overlap the range (the open period's record included) and today's IDs from `ACCT.ENT.TODAY`, then fetches `STMT.ENTRY` records by primary key in batches, falling back to the archive tables for IDs not in the live table.
+5. Core builds the statement: running balance, narratives from transaction codes, opening and closing balances worked out from both anchors, which must agree; a disagreement or a missing entry holds the statement for operations.
 6. Renderer streams the requested format; PDF is password-protected.
 7. File stored on the NAS with a checksum; audit record written; file delivered or made available for download.
 
@@ -573,7 +609,7 @@ The service reads T24 data directly from the standby, so the statement path need
 | Item | Type | Required? | Purpose |
 | --- | --- | --- | --- |
 | Drill-down on an existing customer or account enquiry | Enquiry configuration (a small routine only if the Browser/Explorer setup cannot open a URL) | Required | Opens the Statement Console with the customer or account pre-filled for branch staff |
-| Read-only database user on the standby | DBA task | Required | Access limited to the customer, account and statement tables listed above |
+| Read-only database user on the standby | DBA task | Required | SELECT only, on the tables listed in Component design, section 1, for each T24 company the bank runs |
 | Intraday enquiry over IRIS or OFS | NOFILE enquiry returning today's entries for a customer's accounts | Only if to-the-second balances are required and the standard IRIS API is not available | Live top-up of today's entries |
 
 Not needed:
@@ -638,7 +674,7 @@ The stack uses mainstream, open-source Java components so no new licences are ne
 | --- | --- | --- |
 | Language and runtime | Java 21 LTS | Latest long-term-support release; virtual threads let each instance run thousands of concurrent database reads with little memory, which suits high-volume statement generation |
 | Application framework | Spring Boot 3.3+ (Web, Security, Actuator, JDBC), virtual threads enabled | Standard for bank microservices; built-in health and metrics |
-| Bulk processing | Spring Batch with partitioned steps | Splits month-end runs by account range across workers, with restart from the last checkpoint |
+| Bulk processing | Spring Batch with partitioned steps | Splits month-end runs by customer ID range across workers, with restart from the last checkpoint |
 | Database access | Oracle JDBC (ojdbc11) with HikariCP connection pooling | Native Oracle driver; pooled, bounded connections to the standby |
 | T24 record parsing | StAX streaming XML parser | Reads `XMLRECORD` without loading whole records into memory |
 | Job queue | Oracle Advanced Queuing via Spring JMS | Included with Oracle; transactional with the service schema |
@@ -699,7 +735,7 @@ The database account used on the standby is read-only and limited to the tables 
 - **Performance:** statement reads never touch T24 except the bounded intraday call; closed-period statements are generated once and served from storage.
 - **Availability:** statement retrieval keeps working during T24 COB and maintenance windows because it reads from the replica, not the T24 application.
 - **Security:** role-based access for staff channels, password-protected PDFs, encryption in transit and at rest, full audit trail.
-- **Observability:** dashboards for request volumes, generation times, queue depth, replication lag and reconciliation breaks, with alerts on each.
+- **Observability:** metrics in the bank's existing monitoring tools for request volumes, generation times, queue depth, replication lag and reconciliation breaks, with alerts on each.
 
 ## Glossary
 
