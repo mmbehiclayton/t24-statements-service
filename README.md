@@ -6,7 +6,9 @@ The data on ssedev is the T24 **R25 model bank**: test data only, with no real c
 
 ## Opening the page
 
-- Through the tunnel: `tsh ssh -L 8097:localhost:8097 ssedev@dev-one`, then open http://localhost:8097/
+- Through an SSH tunnel: `ssh -N -L 8097:localhost:8097 ssedev@dev-ssh.fikia.sensys.co.ke`, enter the ssedev password, leave the window open, then open http://localhost:8097/
+- If port 8097 is already taken on your PC, use another local port, e.g. `-L 8098:localhost:8097` and http://localhost:8098/
+- `tsh ssh` does not work here: Teleport accounts only see the `t24-70` node, not ssedev.
 - After a redeploy, press Ctrl+F5 so the browser loads the new page.
 
 ## Test accounts
