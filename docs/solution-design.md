@@ -1,4 +1,4 @@
-> Exported from the Claude Doc on 28 Oct 2026 (rev 142). The Claude Doc is the master copy; re-export after changes.
+> Exported from the Claude Doc on 28 Oct 2026 (rev 148). The Claude Doc is the master copy; re-export after changes.
 
 # Customer Statement Generation Solution — T24 R21
 
@@ -184,16 +184,9 @@ New indexes, longer timeouts or more T24 application servers can push the limit 
 
 This is what happens when someone asks for a statement, for example a branch officer asking for a customer's statement from 1 January to 31 March across all of the customer's accounts. Internet banking requests and scheduled runs follow the same steps. Every step only reads; nothing is ever written to T24.
 
-1. **Check the request.** The API gateway authenticates the caller (a channel or a staff member). The service checks the customer, the dates and the caller's rights. If this exact closed-period statement was built before, the stored copy is returned straight away.
-2. **Find the accounts.** `CUSTOMER.ACCOUNT` lists the accounts the customer owns; the full build adds joint accounts and accounts closed during the period. `CUSTOMER` gives the name and address. For a single-account request this step is skipped.
-3. **Read each account.** `ACCOUNT` gives the title, currency, category and current balance.
-4. **Find the entry ids.** For each account and statement period, T24 keeps a `STMT.PRINTED` record that lists the ids of every entry in that period. The service reads only the periods that overlap the requested dates, by key (account and date), including the current open period. Entries booked today and not yet in any period come from `ACCT.ENT.TODAY`.
-5. **Fetch the entries.** `STMT.ENTRY` records are read by id, a few hundred at a time. Ids not found in the live table are looked up in the archive tables, so old periods still work.
-6. **Work out the balances.** Each entry has a booking date, a value date and a signed amount. The opening and closing balances are calculated from a known balance (see below), and a running balance is shown on every line. Lines are listed by booking date, then value date.
-7. **Add descriptions.** Each line gets its narrative from the entry and the description of its transaction code from `TRANSACTION`, plus the bank's local narrative rules carried over in Phase 1. Descriptions are cached, so each code is read once.
-8. **Total per currency.** For a multi-account statement, accounts are grouped by currency, and the opening balance, debits, credits and closing balance are totalled per currency. Different currencies are never added together.
-9. **Produce the file.** The statement is rendered as a PDF (bank template, optional password), an Excel file or a CSV. Large statements are written page by page, so memory use stays flat.
-10. **Store and deliver.** A closed-period statement is stored for the retention period and recorded in the audit trail, then returned to the caller or sent by email.
+&#91;embedded content: statement build · 10 read-only steps, 1 balance check\]
+
+Read it top to bottom: each step is on the left and the T24 table it reads is on the right. A closed-period statement that was built before skips straight to delivery (dashed line). After step 6, a statement whose two balance calculations disagree, or that lists an entry T24 cannot find, is held for operations instead of being released.
 
 Many statements are built side by side on a pool of workers, so throughput grows with the number of workers instead of with the length of the queue.
 
@@ -290,7 +283,7 @@ The service can run on the bank's container platform (OpenShift/Kubernetes), whe
 | --- | --- | --- | --- |
 | Statement Service | One application that takes requests, serves the staff console, builds statements and runs scheduled jobs | 1 VM (or the same capacity on the container platform) | 8 vCPU, 16 GB RAM, 100 GB disk |
 
-Requests, the staff console, statement building and scheduling all run inside one application, so one server is enough for UAT and development. For production later, the same application runs as two identical copies for availability, and a lock in the database makes sure only one copy starts scheduled runs. More copies are added only if the benchmark shows they are needed.
+Requests, the staff console, statement building and scheduling all run inside one application, so one server is enough for UAT and development. Production is sized after the benchmark and stays the same single application. If the bank wants high availability, a second copy of it can be added, and a lock in the database then makes sure only one copy starts scheduled runs.
 
 ### Databases
 
@@ -468,7 +461,7 @@ With Active Data Guard the replica lags production by seconds, so an intraday ca
 
 ### 3. Statement Service
 
-- Spring Boot service that keeps no state in memory between requests, so any copy can serve any request: one instance in UAT, two identical instances behind the bank's load balancer in production.
+- Spring Boot service that keeps no state in memory between requests, so any copy can serve any request. It is one application, run as one instance in UAT. Production is sized after the benchmark; a second copy of the same application can be added behind the bank's load balancer for availability.
 - **Sync API** for small requests (indicatively up to 3 months or 5,000 entries); **async queue** (Oracle Advanced Queuing, included with the bank's Oracle database, or the bank's existing message broker) for large ranges, bulk and scheduled runs, with a notification when ready.
 - Balances are derived from T24's own figures in two independent ways that must agree: back from the account's current balance in `ACCOUNT` (closing = current balance minus entries booked after the end date), and forward from the balance at the last statement date in `ACCT.STMT.PRINT` on or before the start. History is never summed from the account's first entry. Statements follow booking date (the date an entry was posted), with value date shown as a column, so back-valued items appear when they were booked and totals still agree with T24. The bank confirms this rule in the design workshop.
 - Handles multi-currency accounts, joint accounts and combined multi-account corporate statements.
@@ -640,7 +633,7 @@ Channels reach the service through the API gateway; the service reads the existi
 | Active Directory | Existing | Single sign-on and roles for the Statement Console |
 | Container platform or app server hosts | Existing where available | Service deployed as a new workload on the bank's current platform |
 | Compute for the Statement Service | **New** | Statement building must run outside T24 to beat the standard solution; sharing T24 servers would recreate today's bottleneck. Sized from the Phase 1 benchmark |
-| Statement Console | **New (no new server)** | Branch staff and operations need to request statements, supervise runs, clear reconciliation breaks and re-send files; it ships inside the Statement API deployable |
+| Statement Console | **New (no new server)** | Branch staff and operations need to request statements, supervise runs, clear reconciliation breaks and re-send files; it is part of the same Statement Service application |
 | Active Data Guard licence | **New, if not held** | Cheapest way to read live data without load on the primary; avoids a second database |
 | GoldenGate schema on existing Oracle instance | **Fallback only** | Needed only if Active Data Guard is not available and no reporting copy of T24 exists; uses an existing non-core Oracle instance |
 
@@ -649,7 +642,7 @@ Using the standby avoids adding a database, keeps the bank's DBA practices uncha
 ### Request flows
 
 1. **On-demand (small range):** channel → API gateway → Statement API → key-based reads on the standby → renders PDF/Excel → returns the file and stores a copy if the period is closed.
-2. **On-demand (large range or corporate):** Statement API places a job on the queue → a worker generates the statement → file saved to storage → customer or staff notified with a download link.
+2. **On-demand (large range or corporate):** Statement API places a job on the queue → the same service picks it up in the background and generates the statement → file saved to storage → customer or staff notified with a download link.
 3. **Month-end and scheduled:** after COB the scheduler reads `ACCOUNT.STATEMENT` frequencies → splits customers into ranges and resolves their accounts → workers generate in parallel and deliver via email, SFTP or SWIFT.
 4. **Replication:** existing Data Guard redo apply keeps the standby within seconds of production.
 5. **Reconciliation:** nightly job compares statement closing balances with T24 → any break flags the account and blocks its statements until resolved.
@@ -693,7 +686,7 @@ The service is delivered as **OCI container images** with a **Helm chart** for t
 
 | Deployable | Format | Instances | Scaling |
 | --- | --- | --- | --- |
-| statement-service (API, worker and scheduler) | Container image (or JAR on VM) | UAT: 1. Production: 2 identical copies | A database lock lets only one copy run scheduled jobs; customer requests take priority over bulk jobs; more copies only if the benchmark shows a need |
+| statement-service (API, worker and scheduler) | Container image (or JAR on VM) | UAT: 1. Production: sized after the benchmark (a second copy only for availability) | A database lock lets only one copy run scheduled jobs; customer requests take priority over bulk jobs; more copies only if the benchmark shows a need |
 | Service schema | Liquibase changelog | n/a | Applied by the pipeline before each release |
 | Templates and narrative mappings | Versioned config files | n/a | Changed without code release |
 
