@@ -6,9 +6,26 @@ The data on ssedev is the T24 **R25 model bank**: test data only, with no real c
 
 ## Opening the page
 
-- Through an SSH tunnel: `ssh -N -L 8097:localhost:8097 ssedev@dev-ssh.fikia.sensys.co.ke`, enter the ssedev password, leave the window open, then open http://localhost:8097/
-- If port 8097 is already taken on your PC, use another local port, e.g. `-L 8098:localhost:8097` and http://localhost:8098/
-- `tsh ssh` does not work here: Teleport accounts only see the `t24-70` node, not ssedev.
+**Easiest: the tunnel script (no password to type)**
+
+1. In PowerShell, run `python C:\Users\USER\.sse-deploy\statement-tunnel.py`.
+2. Wait for `tunnel up: http://localhost:8097/`, and leave the window open.
+3. Open http://localhost:8097/
+4. To stop it, press Ctrl+C or close the window.
+
+If port 8097 is already taken on your PC, add another port: `python C:\Users\USER\.sse-deploy\statement-tunnel.py 8098`, then open http://localhost:8098/
+
+The script uses `ssedev.py` and `ssedev-creds.env` in the same folder (`C:\Users\USER\.sse-deploy`). The password is read from that file and never printed. It is not in this repo.
+
+**Alternative: plain SSH**
+
+1. Run `ssh -N -L 8097:localhost:8097 ssedev@dev-ssh.fikia.sensys.co.ke`. The first time, add `-o StrictHostKeyChecking=accept-new`. The server's key fingerprint is `SHA256:eVBYM0HUzv7fujcvL1gZt6LjjoMghBk+ia3ubMotSVo`.
+2. Paste the ssedev password (the `APP_PW` value in `ssedev-creds.env`) with a right-click. Nothing appears while you paste.
+3. Leave the window open, then open http://localhost:8097/
+
+`tsh ssh` does not work here: Teleport accounts only see the `t24-70` node, not ssedev.
+
+**Either way**
 - After a redeploy, press Ctrl+F5 so the browser loads the new page.
 
 ## Test accounts
